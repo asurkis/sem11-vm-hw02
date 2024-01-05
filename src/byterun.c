@@ -1,6 +1,9 @@
 /* Lama SM Bytecode interpreter */
 
+#include "../runtime/gc.h"
 #include "../runtime/runtime.h"
+#include "../runtime/runtime_common.h"
+#include "../runtime/virt_stack.h"
 #include <errno.h>
 #include <malloc.h>
 #include <stdio.h>
@@ -58,13 +61,38 @@ bytefile *read_file(char *fname) {
   return file;
 }
 
-/* Disassembles the bytecode pool */
-void disassemble(FILE *f, bytefile *bf) {
+// runtime.h и runtime_common.h не экспортируют Bstring
+extern void *Bstring(void *);
+// Barray и Bsexp не подходят, т.к. в них элементы передаются через varargs
+
+// Вспомогательные функции,
+// чтобы стек правильно обрабатывался
+// сборщиком мусора
+extern size_t __gc_stack_top, __gc_stack_bottom;
+
+void s_push(virt_stack *st, size_t x) {
+  vstack_push(st, x);
+  __gc_stack_top = (size_t)&st->buf[st->cur];
+}
+
+size_t s_pop(virt_stack *st) {
+  size_t res     = vstack_pop(st);
+  __gc_stack_top = (size_t)&st->buf[st->cur];
+  return res;
+}
+
+void interpret(FILE *f, bytefile *bf) {
+  virt_stack *vstack = vstack_create();
+  if (!vstack) failure("Could not allocate vstack");
+  vstack_init(vstack);
+  __gc_stack_top = (size_t)&vstack->buf[vstack->cur];
+  __gc_stack_top = (size_t)&vstack->buf[vstack->cur];
 
 #define INT (ip += sizeof(int), *(int *)(ip - sizeof(int)))
 #define BYTE *ip++
 #define STRING get_string(bf, INT)
 #define FAIL failure("ERROR: invalid opcode %d-%d\n", h, l)
+#define TODO failure("Unimplemented, line %d\n", __LINE__);
 
   char *ip     = bf->code_ptr;
   char *ops[]  = {"+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=", "&&", "!!"};
@@ -76,39 +104,39 @@ void disassemble(FILE *f, bytefile *bf) {
     fprintf(f, "0x%.8lx:\t", ip - bf->code_ptr - 1);
 
     switch (h) {
-    case 15: goto stop;
+    case 15: TODO goto stop;
 
     /* BINOP */
-    case 0: fprintf(f, "BINOP\t%s", ops[l - 1]); break;
+    case 0: TODO fprintf(f, "BINOP\t%s", ops[l - 1]); break;
 
     case 1:
       switch (l) {
-      case 0: fprintf(f, "CONST\t%d", INT); break;
+      case 0: TODO fprintf(f, "CONST\t%d", INT); break;
 
-      case 1: fprintf(f, "STRING\t%s", STRING); break;
+      case 1: TODO fprintf(f, "STRING\t%s", STRING); break;
 
       case 2:
-        fprintf(f, "SEXP\t%s ", STRING);
+        TODO fprintf(f, "SEXP\t%s ", STRING);
         fprintf(f, "%d", INT);
         break;
 
-      case 3: fprintf(f, "STI"); break;
+      case 3: TODO fprintf(f, "STI"); break;
 
-      case 4: fprintf(f, "STA"); break;
+      case 4: TODO fprintf(f, "STA"); break;
 
-      case 5: fprintf(f, "JMP\t0x%.8x", INT); break;
+      case 5: TODO fprintf(f, "JMP\t0x%.8x", INT); break;
 
-      case 6: fprintf(f, "END"); break;
+      case 6: TODO fprintf(f, "END"); break;
 
-      case 7: fprintf(f, "RET"); break;
+      case 7: TODO fprintf(f, "RET"); break;
 
-      case 8: fprintf(f, "DROP"); break;
+      case 8: TODO fprintf(f, "DROP"); break;
 
-      case 9: fprintf(f, "DUP"); break;
+      case 9: TODO fprintf(f, "DUP"); break;
 
-      case 10: fprintf(f, "SWAP"); break;
+      case 10: TODO fprintf(f, "SWAP"); break;
 
-      case 11: fprintf(f, "ELEM"); break;
+      case 11: TODO fprintf(f, "ELEM"); break;
 
       default: FAIL;
       }
@@ -119,32 +147,32 @@ void disassemble(FILE *f, bytefile *bf) {
     case 4:
       fprintf(f, "%s\t", lds[h - 2]);
       switch (l) {
-      case 0: fprintf(f, "G(%d)", INT); break;
-      case 1: fprintf(f, "L(%d)", INT); break;
-      case 2: fprintf(f, "A(%d)", INT); break;
-      case 3: fprintf(f, "C(%d)", INT); break;
+      case 0: TODO fprintf(f, "G(%d)", INT); break;
+      case 1: TODO fprintf(f, "L(%d)", INT); break;
+      case 2: TODO fprintf(f, "A(%d)", INT); break;
+      case 3: TODO fprintf(f, "C(%d)", INT); break;
       default: FAIL;
       }
       break;
 
     case 5:
       switch (l) {
-      case 0: fprintf(f, "CJMPz\t0x%.8x", INT); break;
+      case 0: TODO fprintf(f, "CJMPz\t0x%.8x", INT); break;
 
-      case 1: fprintf(f, "CJMPnz\t0x%.8x", INT); break;
+      case 1: TODO fprintf(f, "CJMPnz\t0x%.8x", INT); break;
 
       case 2:
-        fprintf(f, "BEGIN\t%d ", INT);
+        TODO fprintf(f, "BEGIN\t%d ", INT);
         fprintf(f, "%d", INT);
         break;
 
       case 3:
-        fprintf(f, "CBEGIN\t%d ", INT);
+        TODO fprintf(f, "CBEGIN\t%d ", INT);
         fprintf(f, "%d", INT);
         break;
 
       case 4:
-        fprintf(f, "CLOSURE\t0x%.8x", INT);
+        TODO fprintf(f, "CLOSURE\t0x%.8x", INT);
         {
           int n = INT;
           for (int i = 0; i < n; i++) {
@@ -159,44 +187,44 @@ void disassemble(FILE *f, bytefile *bf) {
         };
         break;
 
-      case 5: fprintf(f, "CALLC\t%d", INT); break;
+      case 5: TODO fprintf(f, "CALLC\t%d", INT); break;
 
       case 6:
-        fprintf(f, "CALL\t0x%.8x ", INT);
+        TODO fprintf(f, "CALL\t0x%.8x ", INT);
         fprintf(f, "%d", INT);
         break;
 
       case 7:
-        fprintf(f, "TAG\t%s ", STRING);
+        TODO fprintf(f, "TAG\t%s ", STRING);
         fprintf(f, "%d", INT);
         break;
 
-      case 8: fprintf(f, "ARRAY\t%d", INT); break;
+      case 8: TODO fprintf(f, "ARRAY\t%d", INT); break;
 
       case 9:
-        fprintf(f, "FAIL\t%d", INT);
+        TODO fprintf(f, "FAIL\t%d", INT);
         fprintf(f, "%d", INT);
         break;
 
-      case 10: fprintf(f, "LINE\t%d", INT); break;
+      case 10: TODO fprintf(f, "LINE\t%d", INT); break;
 
       default: FAIL;
       }
       break;
 
-    case 6: fprintf(f, "PATT\t%s", pats[l]); break;
+    case 6: TODO fprintf(f, "PATT\t%s", pats[l]); break;
 
     case 7: {
       switch (l) {
-      case 0: fprintf(f, "CALL\tLread"); break;
+      case 0: TODO fprintf(f, "CALL\tLread"); break;
 
-      case 1: fprintf(f, "CALL\tLwrite"); break;
+      case 1: TODO fprintf(f, "CALL\tLwrite"); break;
 
-      case 2: fprintf(f, "CALL\tLlength"); break;
+      case 2: TODO fprintf(f, "CALL\tLlength"); break;
 
-      case 3: fprintf(f, "CALL\tLstring"); break;
+      case 3: TODO fprintf(f, "CALL\tLstring"); break;
 
-      case 4: fprintf(f, "CALL\tBarray\t%d", INT); break;
+      case 4: TODO fprintf(f, "CALL\tBarray\t%d", INT); break;
 
       default: FAIL;
       }
@@ -211,24 +239,8 @@ stop:
   fprintf(f, "<end>\n");
 }
 
-/* Dumps the contents of the file */
-void dump_file(FILE *f, bytefile *bf) {
-  int i;
-
-  fprintf(f, "String table size       : %d\n", bf->stringtab_size);
-  fprintf(f, "Global area size        : %d\n", bf->global_area_size);
-  fprintf(f, "Number of public symbols: %d\n", bf->public_symbols_number);
-  fprintf(f, "Public symbols          :\n");
-
-  for (i = 0; i < bf->public_symbols_number; i++)
-    fprintf(f, "   0x%.8x: %s\n", get_public_offset(bf, i), get_public_name(bf, i));
-
-  fprintf(f, "Code:\n");
-  disassemble(f, bf);
-}
-
 int main(int argc, char *argv[]) {
   bytefile *f = read_file(argv[1]);
-  dump_file(stdout, f);
+  interpret(stdout, f);
   return 0;
 }

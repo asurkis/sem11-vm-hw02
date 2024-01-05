@@ -8,11 +8,11 @@ clean:
 	$(MAKE) -C ../runtime clean
 	rm -rf *.o lama-impl
 
-lama-impl: byterun.o runtime.a
-	$(CC) $(CCFLAGS) byterun.o ../runtime/runtime.a -o lama-impl
+lama-impl: byterun.o runtime
+	$(CC) $(CCFLAGS) byterun.o ../runtime/runtime.a ../runtime/virt_stack.o -o lama-impl
 
-runtime.a:
-	$(MAKE) -C ../runtime
+runtime:
+	$(MAKE) -C ../runtime all virt_stack.o
 
 %.o: %.c
-	$(CC) $(CCFLAGS) -I../runtime -c $*.c
+	$(CC) $(CCFLAGS) -c $*.c
