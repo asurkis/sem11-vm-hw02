@@ -1,0 +1,21 @@
+# BasedOnStyle: Microsoft
+# AttributeMacros: []
+# AlignArrayOfStructures: Left
+ColumnLimit: 120
+
+AlignConsecutiveAssignments: true
+AlignConsecutiveBitFields: true
+AlignConsecutiveDeclarations: true
+
+AllowAllArgumentsOnNextLine: false
+BinPackArguments: false
+BinPackParameters: false
+
+BreakBeforeBinaryOperators: true
+AlignOperands: AlignAfterOperator
+
+AllowShortBlocksOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: true
+AllowShortLoopsOnASingleLine: true
