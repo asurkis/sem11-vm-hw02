@@ -62,28 +62,17 @@ bytefile *read_file(char *fname) {
   return file;
 }
 
-/* runtime.h и runtime_common.h не экспортируют эти функции */
-extern void *Bstring(void *);
-extern void *Belem(void *p, int i);
-extern void *Bsta(void *v, int i, void *x);
-extern int   Lread();
-extern int   Lwrite(int n);
-extern int   Llength(void *p);
-extern void *Lstring(void *);
-
-/* Barray и Bsexp не подходят, т.к. в них элементы передаются через varargs */
-
 /* Вспомогательные функции, чтобы стек правильно обрабатывался сборщиком мусора */
 extern size_t __gc_stack_top, __gc_stack_bottom;
 
 void s_push(virt_stack *st, size_t x) {
   vstack_push(st, x);
-  __gc_stack_top = (size_t)vstack_top(st);
+  __gc_stack_top = (size_t)((size_t *)vstack_top(st) - 1);
 }
 
 size_t s_pop(virt_stack *st) {
   size_t res     = vstack_pop(st);
-  __gc_stack_top = (size_t)vstack_top(st);
+  __gc_stack_top = (size_t)((size_t *)vstack_top(st) - 1);
   return res;
 }
 
@@ -94,6 +83,27 @@ void s_swap(virt_stack *st) {
   size_t  x   = top[0];
   top[0]      = top[1];
   top[1]      = x;
+}
+
+/* runtime.h и runtime_common.h не экспортируют эти функции */
+extern void *Bstring(void *);
+extern void *Belem(void *p, int i);
+extern void *Bsta(void *v, int i, void *x);
+extern int   Lread();
+extern int   Lwrite(int n);
+extern int   Llength(void *p);
+extern void *Lstring(void *);
+
+/* Barray и Bsexp не подходят, т.к. в них элементы передаются через varargs */
+extern void *LmakeArray(int length);
+
+size_t Warray(virt_stack *st, int n) {
+  void *arr = LmakeArray(BOX(n));
+  for (int i = 0; i < n; ++i) {
+    size_t x = s_pop(st);
+    Bsta((void *)x, BOX(n - 1 - i), arr);
+  }
+  return (size_t)arr;
 }
 
 enum {
@@ -250,7 +260,7 @@ void interpret(FILE *f, bytefile *bf) {
         char *cstr = STRING;
         fprintf(f, "STRING\t%s", cstr);
         void *str = Bstring(cstr);
-        vstack_push(vstack, (size_t)str);
+        s_push(vstack, (size_t)str);
       } break;
 
       case LO_1_SEXP:
@@ -544,10 +554,12 @@ void interpret(FILE *f, bytefile *bf) {
         TODO;
         break;
 
-      case BUILTIN_ARRAY:
-        fprintf(f, "CALL\tBarray\t%d", INT);
-        TODO;
-        break;
+      case BUILTIN_ARRAY: {
+        int n = INT;
+        fprintf(f, "CALL\tBarray\t%d", n);
+        size_t x = Warray(vstack, n);
+        s_push(vstack, x);
+      } break;
 
       default: FAIL;
       }
@@ -567,5 +579,7 @@ stop:
 int main(int argc, char *argv[]) {
   bytefile *f = read_file(argv[1]);
   interpret(stderr, f);
+  free(f->global_ptr);
+  free(f);
   return 0;
 }
