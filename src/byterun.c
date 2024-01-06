@@ -328,10 +328,11 @@ void interpret(FILE *f, bytefile *bf) {
         size_t x = p_locals[pos];
         s_push(vstack, x);
       } break;
-      case MEM_A:
+      case MEM_A: {
         fprintf(f, "A(%d)", pos);
-        TODO;
-        break;
+        size_t x = p_args[pos];
+        s_push(vstack, x);
+      } break;
       case MEM_C:
         fprintf(f, "C(%d)", pos);
         TODO;
@@ -453,11 +454,15 @@ void interpret(FILE *f, bytefile *bf) {
         TODO;
         break;
 
-      case LO_2_CALL:
-        fprintf(f, "CALL\t0x%.8x ", INT);
-        fprintf(f, "%d", INT);
-        TODO;
-        break;
+      case LO_2_CALL: {
+        int addr  = INT;
+        int nargs = INT;
+        fprintf(f, "CALL\t0x%.8x ", addr);
+        fprintf(f, "%d", nargs);
+        int ret_addr = ip - bf->code_ptr;
+        s_push(vstack, BOX(ret_addr));
+        ip = bf->code_ptr + addr;
+      } break;
 
       case LO_2_TAG:
         fprintf(f, "TAG\t%s ", STRING);
