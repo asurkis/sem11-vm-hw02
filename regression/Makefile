@@ -9,12 +9,10 @@ LAMA_IMPL=../src/lama-impl
 
 check: ctest111 $(TESTS)
 
-$(TESTS): %: %.log
-	# @echo "regression/$@"
+$(TESTS): %: %.bc
+	@echo "regression/$@"
+	$(LAMA_IMPL) $< < $*.input > $*.log
 	diff $@.log orig/$@.log
-
-%.log: %.bc
-	$(LAMA_IMPL) $< < $*.input > $@
 
 %.bc: %.lama
 	$(LAMAC) -b $<
