@@ -112,7 +112,7 @@ size_t Wsexp(virt_stack *st, char *tag, int n) {
   data *obj = (data *)s;
   int  *arr = (int *)obj->contents;
   s->tag    = LtagHash(tag);
-  for (int i = 1; i < n; ++i) {
+  for (int i = 0; i < n; ++i) {
     int x      = s_pop(st);
     arr[n - i] = x;
   }
@@ -526,11 +526,13 @@ void interpret(FILE *f, bytefile *bf) {
         TODO;
         break;
 
-      case LO_2_FAIL:
-        fprintf(f, "FAIL\t%d", INT);
-        fprintf(f, "%d", INT);
+      case LO_2_FAIL: {
+        int line = INT;
+        int col  = INT;
+        fprintf(f, "FAIL\t%d %d", line, col);
+        failure("%d:%d\n", line, col);
         TODO;
-        break;
+      } break;
 
       case LO_2_LINE: {
         /* LINE INT
