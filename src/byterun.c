@@ -89,12 +89,13 @@ void s_swap(virt_stack *st) {
 extern void *Bstring(void *);
 extern void *Belem(void *p, int i);
 extern void *Bsta(void *v, int i, void *x);
+extern int   Btag(void *d, int t, int n);
 extern int   Lread();
 extern int   Lwrite(int n);
 extern int   Llength(void *p);
 extern void *Lstring(void *);
 extern int   LtagHash(char *s);
-extern int   Btag(void *d, int t, int n);
+extern void *Lstring(void *p);
 
 /* Barray и Bsexp не подходят, т.к. в них элементы передаются через varargs */
 size_t Warray(virt_stack *st, int n) {
@@ -111,7 +112,7 @@ size_t Wsexp(virt_stack *st, char *tag, int n) {
   sexp *s   = alloc_sexp(n);
   data *obj = (data *)s;
   int  *arr = (int *)obj->contents;
-  s->tag    = LtagHash(tag);
+  s->tag    = UNBOX(LtagHash(tag));
   for (int i = 0; i < n; ++i) {
     int x      = s_pop(st);
     arr[n - i] = x;
@@ -517,7 +518,7 @@ void interpret(FILE *f, bytefile *bf) {
 
         size_t x    = s_pop(vstack);
         int    hash = LtagHash(tag);
-        int    y    = Btag((void *)x, BOX(hash), BOX(nelems));
+        int    y    = Btag((void *)x, hash, BOX(nelems));
         s_push(vstack, y);
       } break;
 
@@ -572,10 +573,12 @@ void interpret(FILE *f, bytefile *bf) {
         s_push(vstack, y);
       } break;
 
-      case BUILTIN_STRING:
+      case BUILTIN_STRING: {
         fprintf(f, "CALL\tLstring");
-        TODO;
-        break;
+        size_t x = s_pop(vstack);
+        size_t y = (size_t)Lstring((void *)x);
+        s_push(vstack, y);
+      } break;
 
       case BUILTIN_ARRAY: {
         int n = INT;
