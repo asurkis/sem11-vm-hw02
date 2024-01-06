@@ -86,16 +86,15 @@ void s_swap(virt_stack *st) {
 }
 
 /* runtime.h и runtime_common.h не экспортируют эти функции */
-extern void *Bstring(void *);
 extern void *Belem(void *p, int i);
 extern void *Bsta(void *v, int i, void *x);
+extern void *Bstring(void *);
 extern int   Btag(void *d, int t, int n);
-extern int   Lread();
-extern int   Lwrite(int n);
 extern int   Llength(void *p);
-extern void *Lstring(void *);
-extern int   LtagHash(char *s);
+extern int   Lread();
 extern void *Lstring(void *p);
+extern int   LtagHash(char *s);
+extern int   Lwrite(int n);
 
 /* Barray и Bsexp не подходят, т.к. в них элементы передаются через varargs */
 size_t Warray(virt_stack *st, int n) {
@@ -214,13 +213,17 @@ void interpret(FILE *f, bytefile *bf) {
   /* Будем хранить глобальные переменные также на стеке,
      чтобы их тоже видел сборщик мусора */
   for (int i = 0; i < bf->global_area_size; ++i) s_push(vstack, BOX(0));
+  int     i_globals = vstack->cur;
   size_t *p_globals = vstack_top(vstack);
 
-  int     stack_frame_pos = 0;
-  int     stack_nargs     = 0;
-  int     stack_nlocals   = 0;
-  size_t *p_args          = 0;
-  size_t *p_locals        = 0;
+  int stack_frame_pos = 0;
+  int stack_nargs     = 0;
+  int stack_nlocals   = 0;
+
+  int     i_args   = 0;
+  int     i_locals = 0;
+  size_t *p_args   = 0;
+  size_t *p_locals = 0;
 
 #define INT (ip += sizeof(int), *(int *)(ip - sizeof(int)))
 #define BYTE *ip++
@@ -294,9 +297,19 @@ void interpret(FILE *f, bytefile *bf) {
         fprintf(f, "STA");
         size_t v = s_pop(vstack);
         size_t i = s_pop(vstack);
-        size_t x = s_pop(vstack);
-        size_t y = (size_t)Bsta((void *)v, i, (void *)x);
-        s_push(vstack, y);
+        /* Будем различать адреса переменных и индексы по старшему
+           не знаковому биту индекса. Младший отнимается BOX'ом,
+           поэтому получается, что настоящий адрес --- 29-битный */
+        if (i & 0x40000000) {
+          int pos          = i & ~0x40000000;
+          pos              = UNBOX(pos);
+          vstack->buf[pos] = v;
+          s_push(vstack, v);
+        } else {
+          size_t x = s_pop(vstack);
+          size_t y = (size_t)Bsta((void *)v, i, (void *)x);
+          s_push(vstack, y);
+        }
       } break;
 
       case LO_1_JMP: {
@@ -324,8 +337,10 @@ void interpret(FILE *f, bytefile *bf) {
         stack_nlocals = UNBOX(vstack->buf[stack_frame_pos + 1]);
         stack_nargs   = UNBOX(vstack->buf[stack_frame_pos + 2]);
 
-        p_locals = vstack->buf + stack_frame_pos + 3;
-        p_args   = p_locals + stack_nlocals + 1;
+        i_locals = stack_frame_pos + 3;
+        i_args   = i_locals + stack_nlocals + 1;
+        p_locals = vstack->buf + i_locals;
+        p_args   = vstack->buf + i_args;
       } break;
 
       case LO_1_RET:
@@ -363,22 +378,20 @@ void interpret(FILE *f, bytefile *bf) {
 
     case HI_LD: {
       fprintf(f, "%s\t", lds[h - 2]);
-      int pos = INT;
+      int    pos = INT;
+      size_t x   = 0;
       switch (l) {
       case MEM_G: {
         fprintf(f, "G(%d)", pos);
-        size_t x = p_globals[pos];
-        s_push(vstack, x);
+        x = p_globals[pos];
       } break;
       case MEM_L: {
         fprintf(f, "L(%d)", pos);
-        size_t x = p_locals[pos];
-        s_push(vstack, x);
+        x = p_locals[pos];
       } break;
       case MEM_A: {
         fprintf(f, "A(%d)", pos);
-        size_t x = p_args[pos];
-        s_push(vstack, x);
+        x = p_args[pos];
       } break;
       case MEM_C:
         fprintf(f, "C(%d)", pos);
@@ -386,30 +399,36 @@ void interpret(FILE *f, bytefile *bf) {
         break;
       default: FAIL;
       }
+      s_push(vstack, x);
     } break;
 
-    case HI_LDA:
+    case HI_LDA: {
       fprintf(f, "%s\t", lds[h - 2]);
+      int addr = 0;
       switch (l) {
-      case MEM_G:
-        fprintf(f, "G(%d)", INT);
-        TODO;
-        break;
-      case MEM_L:
-        fprintf(f, "L(%d)", INT);
-        TODO;
-        break;
-      case MEM_A:
-        fprintf(f, "A(%d)", INT);
-        TODO;
-        break;
+      case MEM_G: {
+        int i = INT;
+        fprintf(f, "G(%d)", i);
+        addr = i_globals + i;
+      } break;
+      case MEM_L: {
+        int i = INT;
+        fprintf(f, "L(%d)", i);
+        addr = i_locals + i;
+      } break;
+      case MEM_A: {
+        int i = INT;
+        fprintf(f, "A(%d)", i);
+        addr = i_args + i;
+      } break;
       case MEM_C:
         fprintf(f, "C(%d)", INT);
         TODO;
         break;
       default: FAIL;
       }
-      break;
+      s_push(vstack, BOX(addr) | 0x40000000);
+    } break;
 
     case HI_ST: {
       int    pos = INT;
