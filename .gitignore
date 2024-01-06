@@ -1,3 +1,4 @@
 *.o
 *.bc
 src/lama-impl
+regression/test111
