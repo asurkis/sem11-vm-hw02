@@ -4,6 +4,7 @@
 #include "../runtime/runtime.h"
 #include "../runtime/runtime_common.h"
 #include "../runtime/virt_stack.h"
+#include <alloca.h>
 #include <errno.h>
 #include <malloc.h>
 #include <stdio.h>
@@ -61,8 +62,15 @@ bytefile *read_file(char *fname) {
   return file;
 }
 
-/* runtime.h и runtime_common.h не экспортируют Bstring */
+/* runtime.h и runtime_common.h не экспортируют эти функции */
 extern void *Bstring(void *);
+extern void *Belem(void *p, int i);
+extern void *Bsta(void *v, int i, void *x);
+extern int   Lread();
+extern int   Lwrite(int n);
+extern int   Llength(void *p);
+extern void *Lstring(void *);
+
 /* Barray и Bsexp не подходят, т.к. в них элементы передаются через varargs */
 
 /* Вспомогательные функции, чтобы стек правильно обрабатывался сборщиком мусора */
@@ -164,13 +172,16 @@ enum { MEM_G = 0, MEM_L, MEM_A, MEM_C };
    - Адрес предыдущего стекового фрейма
 
    Указатели на стек и на код будем записывать как числа,
-   чтобы сборщик мусора не пытался их обрабатывать как объекты. */
+   чтобы сборщик мусора не пытался их обрабатывать как объекты.
+
+   Будем считать, что байткод корректен, допускаем неопределённое поведение,
+   т.к. его же допускает исходная реализация Ламы */
 
 void interpret(FILE *f, bytefile *bf) {
-  /* Будем считать, что байткод корректен,
-     допускаем неопределённое поведение,
-     т.к. его же допускает исходная реализация Ламы */
-  virt_stack *vstack = vstack_create();
+  __gc_init();
+  /* Из runtime.c следует, что чтобы сборщик мусора работал корректно,
+     стек виртуальной машины должен располагаться на стеке процесса */
+  virt_stack *vstack = alloca(sizeof(virt_stack));
   if (!vstack) failure("Could not allocate vstack");
   vstack_init(vstack);
   __gc_stack_bottom = (size_t)vstack_top(vstack);
@@ -235,10 +246,12 @@ void interpret(FILE *f, bytefile *bf) {
         s_push(vstack, BOX(x));
       } break;
 
-      case LO_1_STRING:
-        fprintf(f, "STRING\t%s", STRING);
-        TODO;
-        break;
+      case LO_1_STRING: {
+        char *cstr = STRING;
+        fprintf(f, "STRING\t%s", cstr);
+        void *str = Bstring(cstr);
+        vstack_push(vstack, (size_t)str);
+      } break;
 
       case LO_1_SEXP:
         fprintf(f, "SEXP\t%s ", STRING);
@@ -251,10 +264,14 @@ void interpret(FILE *f, bytefile *bf) {
         TODO;
         break;
 
-      case LO_1_STA:
+      case LO_1_STA: {
         fprintf(f, "STA");
-        TODO;
-        break;
+        size_t v = s_pop(vstack);
+        size_t i = s_pop(vstack);
+        size_t x = s_pop(vstack);
+        size_t y = (size_t)Bsta((void *)v, i, (void *)x);
+        s_push(vstack, y);
+      } break;
 
       case LO_1_JMP: {
         int addr = INT;
@@ -305,10 +322,13 @@ void interpret(FILE *f, bytefile *bf) {
         TODO;
         break;
 
-      case LO_1_ELEM:
+      case LO_1_ELEM: {
         fprintf(f, "ELEM");
-        TODO;
-        break;
+        size_t i = s_pop(vstack);
+        size_t p = s_pop(vstack);
+        size_t y = (size_t)Belem((void *)p, i);
+        s_push(vstack, y);
+      } break;
 
       default: FAIL;
       }
@@ -501,23 +521,23 @@ void interpret(FILE *f, bytefile *bf) {
       switch (l) {
       case BUILTIN_READ: {
         fprintf(f, "CALL\tLread");
-        int x = 0;
-        printf("> ");
-        scanf("%d", &x);
-        s_push(vstack, BOX(x));
+        int x = Lread();
+        s_push(vstack, x);
       } break;
 
       case BUILTIN_WRITE: {
         fprintf(f, "CALL\tLwrite");
-        size_t xx = *(size_t *)vstack_top(vstack);
-        int    x  = UNBOX(xx);
-        printf("%d\n", x);
+        size_t x = s_pop(vstack);
+        size_t y = Lwrite(x);
+        s_push(vstack, y);
       } break;
 
-      case BUILTIN_LENGTH:
+      case BUILTIN_LENGTH: {
         fprintf(f, "CALL\tLlength");
-        TODO;
-        break;
+        size_t x = s_pop(vstack);
+        size_t y = Llength((void *)x);
+        s_push(vstack, y);
+      } break;
 
       case BUILTIN_STRING:
         fprintf(f, "CALL\tLstring");
@@ -541,7 +561,7 @@ void interpret(FILE *f, bytefile *bf) {
 
 stop:
   fprintf(f, "<end>\n");
-  vstack_destruct(vstack);
+  __shutdown();
 }
 
 int main(int argc, char *argv[]) {
