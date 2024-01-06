@@ -93,17 +93,30 @@ extern int   Lread();
 extern int   Lwrite(int n);
 extern int   Llength(void *p);
 extern void *Lstring(void *);
+extern int   LtagHash(char *s);
+extern int   Btag(void *d, int t, int n);
 
 /* Barray и Bsexp не подходят, т.к. в них элементы передаются через varargs */
-extern void *LmakeArray(int length);
-
 size_t Warray(virt_stack *st, int n) {
-  void *arr = LmakeArray(BOX(n));
+  data *obj = alloc_array(n);
+  int  *arr = (int *)obj->contents;
   for (int i = 0; i < n; ++i) {
-    size_t x = s_pop(st);
-    Bsta((void *)x, BOX(n - 1 - i), arr);
+    int x          = s_pop(st);
+    arr[n - 1 - i] = x;
   }
-  return (size_t)arr;
+  return (size_t)obj->contents;
+}
+
+size_t Wsexp(virt_stack *st, char *tag, int n) {
+  sexp *s   = alloc_sexp(n);
+  data *obj = (data *)s;
+  int  *arr = (int *)obj->contents;
+  s->tag    = LtagHash(tag);
+  for (int i = 1; i < n; ++i) {
+    int x      = s_pop(st);
+    arr[n - i] = x;
+  }
+  return (size_t)obj->contents;
 }
 
 enum {
@@ -263,11 +276,13 @@ void interpret(FILE *f, bytefile *bf) {
         s_push(vstack, (size_t)str);
       } break;
 
-      case LO_1_SEXP:
-        fprintf(f, "SEXP\t%s ", STRING);
-        fprintf(f, "%d", INT);
-        TODO;
-        break;
+      case LO_1_SEXP: {
+        char *tag    = STRING;
+        int   nelems = INT;
+        fprintf(f, "SEXP\t%s %d", tag, nelems);
+        size_t x = Wsexp(vstack, tag, nelems);
+        s_push(vstack, x);
+      } break;
 
       case LO_1_STI:
         fprintf(f, "STI");
@@ -322,10 +337,11 @@ void interpret(FILE *f, bytefile *bf) {
         s_pop(vstack);
         break;
 
-      case LO_1_DUP:
+      case LO_1_DUP: {
         fprintf(f, "DUP");
-        TODO;
-        break;
+        size_t x = *(size_t *)vstack_top(vstack);
+        s_push(vstack, x);
+      } break;
 
       case LO_1_SWAP:
         fprintf(f, "SWAP");
@@ -494,11 +510,16 @@ void interpret(FILE *f, bytefile *bf) {
         ip = bf->code_ptr + addr;
       } break;
 
-      case LO_2_TAG:
-        fprintf(f, "TAG\t%s ", STRING);
-        fprintf(f, "%d", INT);
-        TODO;
-        break;
+      case LO_2_TAG: {
+        char *tag    = STRING;
+        int   nelems = INT;
+        fprintf(f, "TAG\t%s %d", tag, nelems);
+
+        size_t x    = s_pop(vstack);
+        int    hash = LtagHash(tag);
+        int    y    = Btag((void *)x, BOX(hash), BOX(nelems));
+        s_push(vstack, y);
+      } break;
 
       case LO_2_ARRAY:
         fprintf(f, "ARRAY\t%d", INT);
