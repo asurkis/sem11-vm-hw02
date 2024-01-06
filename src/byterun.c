@@ -89,7 +89,7 @@ void s_swap(virt_stack *st) {
 }
 
 enum {
-  HI_END   = 15,
+  HI_STOP  = 15,
   HI_BINOP = 0,
   HI_1,
   HI_LD,
@@ -155,6 +155,17 @@ enum {
 
 enum { MEM_G = 0, MEM_L, MEM_A, MEM_C };
 
+/* Структура стекового фрейма:
+   - Аргументы функции
+   - Адрес возврата
+   - Локальные переменные
+   - Количество аргументов
+   - Количество локальных переменных
+   - Адрес предыдущего стекового фрейма
+
+   Указатели на стек и на код будем записывать как числа,
+   чтобы сборщик мусора не пытался их обрабатывать как объекты. */
+
 void interpret(FILE *f, bytefile *bf) {
   /* Будем считать, что байткод корректен,
      допускаем неопределённое поведение,
@@ -168,13 +179,13 @@ void interpret(FILE *f, bytefile *bf) {
   /* Будем хранить глобальные переменные также на стеке,
      чтобы их тоже видел сборщик мусора */
   for (int i = 0; i < bf->global_area_size; ++i) s_push(vstack, BOX(0));
-  size_t *globals = vstack_top(vstack);
+  size_t *p_globals = vstack_top(vstack);
 
-  int     stack_nargs    = 0;
-  int     stack_nlocals  = 0;
-  size_t *stack_frame_p  = 0;
-  size_t *stack_args_p   = 0;
-  size_t *stack_locals_p = 0;
+  int     stack_frame_pos = 0;
+  int     stack_nargs     = 0;
+  int     stack_nlocals   = 0;
+  size_t *p_args          = 0;
+  size_t *p_locals        = 0;
 
 #define INT (ip += sizeof(int), *(int *)(ip - sizeof(int)))
 #define BYTE *ip++
@@ -191,14 +202,13 @@ void interpret(FILE *f, bytefile *bf) {
     fprintf(f, "0x%.8lx:\t", ip - bf->code_ptr - 1);
 
     switch (h) {
-    case HI_END: goto stop;
+    case HI_STOP: goto stop;
 
     case HI_BINOP: {
-      size_t yy = s_pop(vstack);
-      size_t xx = s_pop(vstack);
-      int    x  = UNBOX(xx);
-      int    y  = UNBOX(yy);
-      int    z  = 0;
+      fprintf(f, "BINOP\t%s", ops[l - 1]);
+      int y = UNBOX(s_pop(vstack));
+      int x = UNBOX(s_pop(vstack));
+      int z = 0;
       switch (l) {
       case BINOP_ADD: z = x + y; break;
       case BINOP_SUB: z = x - y; break;
@@ -215,123 +225,139 @@ void interpret(FILE *f, bytefile *bf) {
       case BINOP_OR: z = x || y ? 1 : 0; break;
       }
       s_push(vstack, BOX(z));
-      fprintf(f, "BINOP\t%s", ops[l - 1]);
     } break;
 
     case HI_1:
       switch (l) {
       case LO_1_CONST: {
         int x = INT;
-        s_push(vstack, BOX(x));
         fprintf(f, "CONST\t%d", x);
+        s_push(vstack, BOX(x));
       } break;
 
       case LO_1_STRING:
-        TODO;
         fprintf(f, "STRING\t%s", STRING);
+        TODO;
         break;
 
       case LO_1_SEXP:
-        TODO;
         fprintf(f, "SEXP\t%s ", STRING);
         fprintf(f, "%d", INT);
+        TODO;
         break;
 
       case LO_1_STI:
-        TODO;
         fprintf(f, "STI");
+        TODO;
         break;
 
       case LO_1_STA:
-        TODO;
         fprintf(f, "STA");
+        TODO;
         break;
 
-      case LO_1_JMP:
-        TODO;
-        fprintf(f, "JMP\t0x%.8x", INT);
-        break;
+      case LO_1_JMP: {
+        int addr = INT;
+        fprintf(f, "JMP\t0x%.8x", addr);
+        ip = bf->code_ptr + addr;
+      } break;
 
-      case LO_1_END:
-#if false
-        TODO;
-#endif
+      case LO_1_END: {
         fprintf(f, "END");
-        break;
+
+        int prev_frame_pos = UNBOX(vstack->buf[stack_frame_pos]);
+        if (prev_frame_pos == 0) {
+          /* Выходим из главной функции */
+          goto stop;
+        }
+        int frame_size = stack_nlocals + stack_nargs + 4;
+        int ret_addr   = UNBOX(vstack->buf[stack_frame_pos + 3 + stack_nlocals]);
+        ip             = bf->code_ptr + ret_addr;
+
+        /* Убираем текущий фрейм */
+        for (int i = 0; i < frame_size; ++i) s_pop(vstack);
+        stack_frame_pos = prev_frame_pos;
+
+        stack_nlocals = UNBOX(vstack->buf[stack_frame_pos + 1]);
+        stack_nargs   = UNBOX(vstack->buf[stack_frame_pos + 2]);
+
+        p_locals = vstack->buf + stack_frame_pos + 3;
+        p_args   = p_locals + stack_nlocals + 1;
+      } break;
 
       case LO_1_RET:
-        TODO;
         fprintf(f, "RET");
+        TODO;
         break;
 
       case LO_1_DROP:
-        /* DROP */
-        s_pop(vstack);
         fprintf(f, "DROP");
+        s_pop(vstack);
         break;
 
       case LO_1_DUP:
-        TODO;
         fprintf(f, "DUP");
+        TODO;
         break;
 
       case LO_1_SWAP:
-        TODO;
         fprintf(f, "SWAP");
+        TODO;
         break;
 
       case LO_1_ELEM:
-        TODO;
         fprintf(f, "ELEM");
+        TODO;
         break;
 
       default: FAIL;
       }
       break;
 
-    case HI_LD:
+    case HI_LD: {
       fprintf(f, "%s\t", lds[h - 2]);
+      int pos = INT;
       switch (l) {
       case MEM_G: {
-        int    pos = INT;
-        size_t x   = globals[pos];
-        s_push(vstack, x);
         fprintf(f, "G(%d)", pos);
+        size_t x = p_globals[pos];
+        s_push(vstack, x);
       } break;
-      case MEM_L:
-        TODO;
-        fprintf(f, "L(%d)", INT);
-        break;
+      case MEM_L: {
+        fprintf(f, "L(%d)", pos);
+        size_t x = p_locals[pos];
+        s_push(vstack, x);
+      } break;
       case MEM_A:
+        fprintf(f, "A(%d)", pos);
         TODO;
-        fprintf(f, "A(%d)", INT);
         break;
       case MEM_C:
+        fprintf(f, "C(%d)", pos);
         TODO;
-        fprintf(f, "C(%d)", INT);
         break;
       default: FAIL;
       }
-      break;
+    } break;
 
     case HI_LDA:
       fprintf(f, "%s\t", lds[h - 2]);
       switch (l) {
       case MEM_G:
-        TODO;
         fprintf(f, "G(%d)", INT);
+        TODO;
         break;
       case MEM_L:
-        TODO;
         fprintf(f, "L(%d)", INT);
+        TODO;
         break;
       case MEM_A:
-        TODO;
         fprintf(f, "A(%d)", INT);
+        TODO;
         break;
       case MEM_C:
-        TODO;
         fprintf(f, "C(%d)", INT);
+        TODO;
         break;
       default: FAIL;
       }
@@ -344,20 +370,20 @@ void interpret(FILE *f, bytefile *bf) {
       fprintf(f, "%s\t", lds[h - 2]);
       switch (l) {
       case MEM_G:
-        globals[pos] = x;
         fprintf(f, "G(%d)", pos);
+        p_globals[pos] = x;
         break;
       case MEM_L:
-        TODO;
         fprintf(f, "L(%d)", pos);
+        p_locals[pos] = x;
         break;
       case MEM_A:
-        TODO;
         fprintf(f, "A(%d)", pos);
+        TODO;
         break;
       case MEM_C:
-        TODO;
         fprintf(f, "C(%d)", pos);
+        TODO;
         break;
       default: FAIL;
       }
@@ -365,39 +391,47 @@ void interpret(FILE *f, bytefile *bf) {
 
     case HI_2:
       switch (l) {
-      case LO_2_CJMP_Z:
-        TODO;
-        fprintf(f, "CJMPz\t0x%.8x", INT);
-        break;
-
-      case LO_2_CJMP_NZ:
-        TODO;
-        fprintf(f, "CJMPnz\t0x%.8x", INT);
-        break;
-
-      case LO_2_BEGIN: {
-        stack_nargs   = INT;
-        stack_nlocals = INT;
-#if false
-        TODO;
-        /* Выделим место для локальных переменных
-           и запишем информацию о предыдущем начале стека */
-        for (int i = 0; i < stack_nlocals; ++i) s_push(vstack, BOX(0));
-        s_push(vstack, BOX(stack_frame_start));
-        s_push(vstack, BOX(stack_nargs));
-        s_push(vstack, BOX(stack_nlocals));
-#endif
-        fprintf(f, "BEGIN\t%d %d", stack_nargs, stack_nlocals);
+      case LO_2_CJMP_Z: {
+        int addr = INT;
+        fprintf(f, "CJMPz\t0x%.8x", addr);
+        size_t x = s_pop(vstack);
+        if (UNBOX(x) == 0) ip = bf->code_ptr + addr;
       } break;
 
+      case LO_2_CJMP_NZ: {
+        int addr = INT;
+        fprintf(f, "CJMPnz\t0x%.8x", addr);
+        size_t x = s_pop(vstack);
+        if (UNBOX(x) != 0) ip = bf->code_ptr + addr;
+      } break;
+
+      case LO_2_BEGIN:
+        stack_nargs   = INT;
+        stack_nlocals = INT;
+        fprintf(f, "BEGIN\t%d %d", stack_nargs, stack_nlocals);
+
+        /* Аргументы и адрес возврата */
+        p_args = (size_t *)vstack_top(vstack) + 1;
+
+        /* Выделим место для локальных переменных */
+        for (int i = 0; i < stack_nlocals; ++i) s_push(vstack, BOX(0));
+        p_locals = vstack_top(vstack);
+
+        s_push(vstack, BOX(stack_nargs));
+        s_push(vstack, BOX(stack_nlocals));
+
+        /* Где находится предыдущий стековый фрейм */
+        s_push(vstack, BOX(stack_frame_pos));
+        stack_frame_pos = vstack->cur;
+        break;
+
       case LO_2_CBEGIN:
-        TODO;
         fprintf(f, "CBEGIN\t%d ", INT);
         fprintf(f, "%d", INT);
+        TODO;
         break;
 
       case LO_2_CLOSURE:
-        TODO;
         fprintf(f, "CLOSURE\t0x%.8x", INT);
         {
           int n = INT;
@@ -411,34 +445,35 @@ void interpret(FILE *f, bytefile *bf) {
             }
           }
         };
+        TODO;
         break;
 
       case LO_2_CALLC:
-        TODO;
         fprintf(f, "CALLC\t%d", INT);
+        TODO;
         break;
 
       case LO_2_CALL:
-        TODO;
         fprintf(f, "CALL\t0x%.8x ", INT);
         fprintf(f, "%d", INT);
+        TODO;
         break;
 
       case LO_2_TAG:
-        TODO;
         fprintf(f, "TAG\t%s ", STRING);
         fprintf(f, "%d", INT);
+        TODO;
         break;
 
       case LO_2_ARRAY:
-        TODO;
         fprintf(f, "ARRAY\t%d", INT);
+        TODO;
         break;
 
       case LO_2_FAIL:
-        TODO;
         fprintf(f, "FAIL\t%d", INT);
         fprintf(f, "%d", INT);
+        TODO;
         break;
 
       case LO_2_LINE: {
@@ -453,40 +488,40 @@ void interpret(FILE *f, bytefile *bf) {
       break;
 
     case HI_PATT:
-      TODO;
       fprintf(f, "PATT\t%s", pats[l]);
+      TODO;
       break;
 
     case HI_BUILTIN: {
       switch (l) {
       case BUILTIN_READ: {
+        fprintf(f, "CALL\tLread");
         int x = 0;
         printf("> ");
         scanf("%d", &x);
         s_push(vstack, BOX(x));
-        fprintf(f, "CALL\tLread");
       } break;
 
       case BUILTIN_WRITE: {
+        fprintf(f, "CALL\tLwrite");
         size_t xx = *(size_t *)vstack_top(vstack);
         int    x  = UNBOX(xx);
         printf("%d\n", x);
-        fprintf(f, "CALL\tLwrite");
       } break;
 
       case BUILTIN_LENGTH:
-        TODO;
         fprintf(f, "CALL\tLlength");
+        TODO;
         break;
 
       case BUILTIN_STRING:
-        TODO;
         fprintf(f, "CALL\tLstring");
+        TODO;
         break;
 
       case BUILTIN_ARRAY:
-        TODO;
         fprintf(f, "CALL\tBarray\t%d", INT);
+        TODO;
         break;
 
       default: FAIL;
