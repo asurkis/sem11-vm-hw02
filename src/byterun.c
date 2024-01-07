@@ -344,7 +344,8 @@ void interpret(FILE *f, bytefile *bf) {
       case LO_1_END: {
         fprintf(f, "END");
 
-        int prev_frame_pos = UNBOX(vstack->buf[stack_frame_pos]);
+        size_t retval         = s_pop(vstack);
+        int    prev_frame_pos = UNBOX(vstack->buf[stack_frame_pos]);
         if (prev_frame_pos == 0) {
           /* Выходим из главной функции */
           goto stop;
@@ -374,6 +375,7 @@ void interpret(FILE *f, bytefile *bf) {
           data *obj = TO_DATA(closure);
           p_closed  = (size_t *)obj->contents + 1;
         }
+        s_push(vstack, retval);
       } break;
 
       case LO_1_RET:
