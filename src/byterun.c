@@ -3,8 +3,6 @@
 #include "../runtime/gc.h"
 #include "../runtime/runtime.h"
 #include "../runtime/runtime_common.h"
-#include "../runtime/virt_stack.h"
-#include <alloca.h>
 #include <errno.h>
 #include <malloc.h>
 #include <stdio.h>
@@ -62,27 +60,25 @@ bytefile *read_file(char *fname) {
   return file;
 }
 
-/* Вспомогательные функции, чтобы стек правильно обрабатывался сборщиком мусора */
 extern size_t __gc_stack_top, __gc_stack_bottom;
 
-void s_push(virt_stack *st, size_t x) {
-  vstack_push(st, x);
-  __gc_stack_top = (size_t)((size_t *)vstack_top(st) - 1);
+/* Т.к. сборщик мусора рассчитан на один стек,
+   сделаем его глобальным */
+#define STACK_SIZE (512 * 1024) /* 2 МБ стека, должно хватить на всё */
+size_t  stack_data[STACK_SIZE];
+size_t *stack_next = stack_data + STACK_SIZE - 1;
+
+size_t *s_top() { return stack_next + 1; }
+
+void s_push(size_t x) {
+  *stack_next--  = x;
+  __gc_stack_top = (size_t)stack_next;
 }
 
-size_t s_pop(virt_stack *st) {
-  size_t res     = vstack_pop(st);
-  __gc_stack_top = (size_t)((size_t *)vstack_top(st) - 1);
+size_t s_pop() {
+  size_t res     = *++stack_next;
+  __gc_stack_top = (size_t)stack_next;
   return res;
-}
-
-/* Не нужно переставлять указатели */
-void s_swap(virt_stack *st) {
-  if (vstack_size(st) < 2) failure("Stack underflow");
-  size_t *top = vstack_top(st);
-  size_t  x   = top[0];
-  top[0]      = top[1];
-  top[1]      = x;
 }
 
 /* runtime.h и runtime_common.h не экспортируют эти функции */
@@ -97,34 +93,34 @@ extern int   LtagHash(char *s);
 extern int   Lwrite(int n);
 
 /* Barray, Bsexp и Bclosure не подходят, т.к. в них элементы передаются через varargs */
-size_t Warray(virt_stack *st, int n) {
+size_t Warray(int n) {
   data *obj = alloc_array(n);
   int  *arr = (int *)obj->contents;
   for (int i = 0; i < n; ++i) {
-    int x          = s_pop(st);
+    int x          = s_pop();
     arr[n - 1 - i] = x;
   }
   return (size_t)obj->contents;
 }
 
-size_t Wsexp(virt_stack *st, char *tag, int n) {
+size_t Wsexp(char *tag, int n) {
   sexp *s   = alloc_sexp(n);
   data *obj = (data *)s;
   int  *arr = (int *)obj->contents;
   s->tag    = UNBOX(LtagHash(tag));
   for (int i = 0; i < n; ++i) {
-    int x      = s_pop(st);
+    int x      = s_pop();
     arr[n - i] = x;
   }
   return (size_t)obj->contents;
 }
 
-size_t Wclosure(virt_stack *st, int entry, int n) {
+size_t Wclosure(int entry, int n) {
   data *obj        = alloc_closure(n + 1);
   int  *arr        = (int *)obj->contents;
   obj->contents[0] = entry;
   for (int i = 0; i < n; ++i) {
-    size_t x   = s_pop(st);
+    size_t x   = s_pop();
     arr[n - i] = x;
   }
   return (size_t)obj->contents;
@@ -220,33 +216,32 @@ enum {
    чтобы сборщик мусора не пытался их обрабатывать как объекты.
 
    Будем считать, что байткод корректен, допускаем неопределённое поведение,
-   т.к. его же допускает исходная реализация Ламы */
+   т.к. его же допускает исходная реализация Ламы.
+
+   Будем добавлять 1 в младший бит указателей не на кучу Ламы,
+   чтобы сборщик мусора считал их целыми числами. */
 
 void interpret(FILE *f, bytefile *bf) {
   __gc_init();
-  /* Из runtime.c следует, что чтобы сборщик мусора работал корректно,
-     стек виртуальной машины должен располагаться на стеке процесса */
-  virt_stack *vstack = alloca(sizeof(virt_stack));
-  if (!vstack) failure("Could not allocate vstack");
-  vstack_init(vstack);
-  __gc_stack_bottom = (size_t)vstack_top(vstack);
+  __gc_stack_bottom = (size_t)s_top();
   __gc_stack_top    = __gc_stack_bottom;
 
   /* Будем хранить глобальные переменные также на стеке,
      чтобы их тоже видел сборщик мусора */
-  for (int i = 0; i < bf->global_area_size; ++i) s_push(vstack, BOX(0));
-  int     i_globals = vstack->cur;
-  size_t *p_globals = vstack_top(vstack);
+  for (int i = 0; i < bf->global_area_size; ++i) s_push(BOX(0));
+  size_t *p_globals = s_top();
+  size_t *p_args    = 0;
+  size_t *p_locals  = 0;
+  size_t *p_closed  = 0;
 
-  int stack_frame_pos = 0;
-  int stack_nargs     = 0;
-  int stack_nlocals   = 0;
+  int stack_nargs   = 0;
+  int stack_nlocals = 0;
 
-  int     i_args   = 0;
-  int     i_locals = 0;
-  size_t *p_args   = 0;
-  size_t *p_locals = 0;
-  size_t *p_closed = 0;
+  size_t *p_stack_frame = 0;
+
+  /* Фиктивное замыкание и адрес возврата для главной функции */
+  s_push(BOX(0));
+  s_push(BOX(0));
 
 #define INT (ip += sizeof(int), *(int *)(ip - sizeof(int)))
 #define BYTE *ip++
@@ -258,7 +253,7 @@ void interpret(FILE *f, bytefile *bf) {
   static char *ops[]  = {"+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=", "&&", "!!"};
   static char *pats[] = {"=str", "#string", "#array", "#sexp", "#ref", "#val", "#fun"};
   static char *lds[]  = {"LD", "LDA", "ST"};
-  do {
+  for (;;) {
     char opcode = BYTE, h = (opcode & 0xF0) >> 4, l = opcode & 0x0F;
     fprintf(f, "0x%.8lx:\t", ip - bf->code_ptr - 1);
 
@@ -267,8 +262,8 @@ void interpret(FILE *f, bytefile *bf) {
 
     case HI_BINOP: {
       fprintf(f, "BINOP\t%s", ops[l - 1]);
-      int y = UNBOX(s_pop(vstack));
-      int x = UNBOX(s_pop(vstack));
+      int y = UNBOX(s_pop());
+      int x = UNBOX(s_pop());
       int z = 0;
       switch (l) {
       case BINOP_ADD: z = x + y; break;
@@ -285,7 +280,7 @@ void interpret(FILE *f, bytefile *bf) {
       case BINOP_AND: z = x && y ? 1 : 0; break;
       case BINOP_OR: z = x || y ? 1 : 0; break;
       }
-      s_push(vstack, BOX(z));
+      s_push(BOX(z));
     } break;
 
     case HI_1:
@@ -293,22 +288,22 @@ void interpret(FILE *f, bytefile *bf) {
       case LO_1_CONST: {
         int x = INT;
         fprintf(f, "CONST\t%d", x);
-        s_push(vstack, BOX(x));
+        s_push(BOX(x));
       } break;
 
       case LO_1_STRING: {
         char *cstr = STRING;
         fprintf(f, "STRING\t%s", cstr);
         void *str = Bstring(cstr);
-        s_push(vstack, (size_t)str);
+        s_push((size_t)str);
       } break;
 
       case LO_1_SEXP: {
         char *tag    = STRING;
         int   nelems = INT;
         fprintf(f, "SEXP\t%s %d", tag, nelems);
-        size_t x = Wsexp(vstack, tag, nelems);
-        s_push(vstack, x);
+        size_t x = Wsexp(tag, nelems);
+        s_push(x);
       } break;
 
       case LO_1_STI:
@@ -318,20 +313,20 @@ void interpret(FILE *f, bytefile *bf) {
 
       case LO_1_STA: {
         fprintf(f, "STA");
-        size_t v = s_pop(vstack);
-        size_t i = s_pop(vstack);
+        size_t v = s_pop();
+        size_t i = s_pop();
         /* Будем различать адреса переменных и индексы по старшему
            не знаковому биту индекса. Младший отнимается BOX'ом,
            поэтому получается, что настоящий адрес --- 29-битный */
         if (i & 0x40000000) {
-          int pos          = i & ~0x40000000;
-          pos              = UNBOX(pos);
-          vstack->buf[pos] = v;
-          s_push(vstack, v);
+          int pos         = i & ~0x40000000;
+          pos             = UNBOX(pos);
+          stack_data[pos] = v;
+          s_push(v);
         } else {
-          size_t x = s_pop(vstack);
+          size_t x = s_pop();
           size_t y = (size_t)Bsta((void *)v, i, (void *)x);
-          s_push(vstack, y);
+          s_push(y);
         }
       } break;
 
@@ -344,29 +339,30 @@ void interpret(FILE *f, bytefile *bf) {
       case LO_1_END: {
         fprintf(f, "END");
 
-        size_t retval         = s_pop(vstack);
-        int    prev_frame_pos = UNBOX(vstack->buf[stack_frame_pos]);
-        if (prev_frame_pos == 0) {
+        size_t  retval       = s_pop();
+        size_t *p_prev_frame = (size_t *)((size_t)*p_stack_frame & ~1);
+        if (p_prev_frame == 0) {
           /* Выходим из главной функции */
           goto stop;
         }
         int frame_size = stack_nlocals + stack_nargs + 5;
-        int ret_addr   = UNBOX(vstack->buf[stack_frame_pos + 3 + stack_nlocals]);
+        int ret_addr   = UNBOX(p_stack_frame[3 + stack_nlocals]);
         ip             = bf->code_ptr + ret_addr;
 
         /* Убираем текущий фрейм */
-        for (int i = 0; i < frame_size; ++i) s_pop(vstack);
-        stack_frame_pos = prev_frame_pos;
+        for (int i = 0; i < frame_size; ++i) s_pop();
+        p_stack_frame = p_prev_frame;
 
-        stack_nlocals = UNBOX(vstack->buf[stack_frame_pos + 1]);
-        stack_nargs   = UNBOX(vstack->buf[stack_frame_pos + 2]);
+        stack_nlocals = UNBOX(p_stack_frame[1]);
+        stack_nargs   = UNBOX(p_stack_frame[2]);
 
-        i_locals = stack_frame_pos + 3;
-        i_args   = i_locals + stack_nlocals + 2;
-        p_locals = vstack->buf + i_locals;
-        p_args   = vstack->buf + i_args;
+        p_locals = p_stack_frame + 3;
+        /* Можно переставлять местами аргументы при вызове,
+           т.к. на вершине стека перед вызовом --- последний,
+           но проще поменять знак при разыменовании */
+        p_args = p_locals + stack_nlocals + 1 + stack_nargs;
 
-        size_t closure = vstack->buf[stack_frame_pos + 3 + stack_nlocals];
+        size_t closure = p_stack_frame[3 + stack_nlocals];
         if (closure == BOX(0)) {
           /* Вернулись в обычную функцию */
           p_closed = 0;
@@ -375,7 +371,7 @@ void interpret(FILE *f, bytefile *bf) {
           data *obj = TO_DATA(closure);
           p_closed  = (size_t *)obj->contents + 1;
         }
-        s_push(vstack, retval);
+        s_push(retval);
       } break;
 
       case LO_1_RET:
@@ -385,13 +381,13 @@ void interpret(FILE *f, bytefile *bf) {
 
       case LO_1_DROP:
         fprintf(f, "DROP");
-        s_pop(vstack);
+        s_pop();
         break;
 
       case LO_1_DUP: {
         fprintf(f, "DUP");
-        size_t x = *(size_t *)vstack_top(vstack);
-        s_push(vstack, x);
+        size_t x = *(size_t *)s_top();
+        s_push(x);
       } break;
 
       case LO_1_SWAP:
@@ -401,10 +397,10 @@ void interpret(FILE *f, bytefile *bf) {
 
       case LO_1_ELEM: {
         fprintf(f, "ELEM");
-        size_t i = s_pop(vstack);
-        size_t p = s_pop(vstack);
+        size_t i = s_pop();
+        size_t p = s_pop();
         size_t y = (size_t)Belem((void *)p, i);
-        s_push(vstack, y);
+        s_push(y);
       } break;
 
       default: FAIL;
@@ -426,7 +422,7 @@ void interpret(FILE *f, bytefile *bf) {
       } break;
       case MEM_A: {
         fprintf(f, "A(%d)", pos);
-        x = p_args[pos];
+        x = p_args[-pos];
       } break;
       case MEM_C:
         fprintf(f, "C(%d)", pos);
@@ -434,27 +430,27 @@ void interpret(FILE *f, bytefile *bf) {
         break;
       default: FAIL;
       }
-      s_push(vstack, x);
+      s_push(x);
     } break;
 
     case HI_LDA: {
       fprintf(f, "%s\t", lds[h - 2]);
-      int addr = 0;
+      size_t *addr = 0;
       switch (l) {
       case MEM_G: {
         int i = INT;
         fprintf(f, "G(%d)", i);
-        addr = i_globals + i;
+        addr = p_globals + i;
       } break;
       case MEM_L: {
         int i = INT;
         fprintf(f, "L(%d)", i);
-        addr = i_locals + i;
+        addr = p_locals + i;
       } break;
       case MEM_A: {
         int i = INT;
         fprintf(f, "A(%d)", i);
-        addr = i_args + i;
+        addr = p_args - i;
       } break;
       case MEM_C:
         fprintf(f, "C(%d)", INT);
@@ -462,12 +458,13 @@ void interpret(FILE *f, bytefile *bf) {
         break;
       default: FAIL;
       }
-      s_push(vstack, BOX(addr) | 0x40000000);
+      size_t pos = addr - stack_data;
+      s_push(BOX(pos) | 0x40000001);
     } break;
 
     case HI_ST: {
       int    pos = INT;
-      size_t x   = *(size_t *)vstack_top(vstack);
+      size_t x   = *(size_t *)s_top();
 
       fprintf(f, "%s\t", lds[h - 2]);
       switch (l) {
@@ -496,14 +493,14 @@ void interpret(FILE *f, bytefile *bf) {
       case LO_2_CJMP_Z: {
         int addr = INT;
         fprintf(f, "CJMPz\t0x%.8x", addr);
-        size_t x = s_pop(vstack);
+        size_t x = s_pop();
         if (UNBOX(x) == 0) ip = bf->code_ptr + addr;
       } break;
 
       case LO_2_CJMP_NZ: {
         int addr = INT;
         fprintf(f, "CJMPnz\t0x%.8x", addr);
-        size_t x = s_pop(vstack);
+        size_t x = s_pop();
         if (UNBOX(x) != 0) ip = bf->code_ptr + addr;
       } break;
 
@@ -513,7 +510,7 @@ void interpret(FILE *f, bytefile *bf) {
         fprintf(f, "BEGIN\t%d %d", stack_nargs, stack_nlocals);
 
         /* Адрес возврата, замыкание, аргументы */
-        size_t *stack_top = vstack_top(vstack);
+        size_t *stack_top = s_top();
         size_t  closure   = stack_top[1];
         if (closure == BOX(0)) {
           /* Обычная функция, без замыкания */
@@ -523,18 +520,18 @@ void interpret(FILE *f, bytefile *bf) {
           data *obj = TO_DATA(closure);
           p_closed  = (size_t *)obj->contents + 1;
         }
-        p_args = stack_top + 2;
+        p_args = stack_top + 1 + stack_nargs;
 
         /* Выделим место для локальных переменных */
-        for (int i = 0; i < stack_nlocals; ++i) s_push(vstack, BOX(0));
-        p_locals = vstack_top(vstack);
+        for (int i = 0; i < stack_nlocals; ++i) s_push(BOX(0));
+        p_locals = s_top();
 
-        s_push(vstack, BOX(stack_nargs));
-        s_push(vstack, BOX(stack_nlocals));
+        s_push(BOX(stack_nargs));
+        s_push(BOX(stack_nlocals));
 
         /* Где находится предыдущий стековый фрейм */
-        s_push(vstack, BOX(stack_frame_pos));
-        stack_frame_pos = vstack->cur;
+        s_push((size_t)p_stack_frame | 1);
+        p_stack_frame = s_top();
       } break;
 
       case LO_2_CBEGIN:
@@ -564,7 +561,7 @@ void interpret(FILE *f, bytefile *bf) {
 
           case MEM_A:
             fprintf(f, "A(%d)", pos);
-            x = p_args[pos];
+            x = p_args[-pos];
             break;
 
           case MEM_C:
@@ -574,22 +571,22 @@ void interpret(FILE *f, bytefile *bf) {
 
           default: FAIL;
           }
-          s_push(vstack, x);
+          s_push(x);
         }
-        size_t closure = Wclosure(vstack, entry, n);
-        s_push(vstack, closure);
+        size_t closure = Wclosure(entry, n);
+        s_push(closure);
       } break;
 
       case LO_2_CALLC: {
         int nargs = INT;
         fprintf(f, "CALLC\t%d", nargs);
         /* Не снимаем со стека */
-        size_t closure  = *(size_t *)vstack_top(vstack);
+        size_t closure  = *(size_t *)s_top();
         data  *obj      = TO_DATA(closure);
         int   *arr      = (int *)obj->contents;
         int    addr     = arr[0];
         int    ret_addr = ip - bf->code_ptr;
-        s_push(vstack, BOX(ret_addr));
+        s_push(BOX(ret_addr));
         ip = bf->code_ptr + addr;
       } break;
 
@@ -599,8 +596,8 @@ void interpret(FILE *f, bytefile *bf) {
         fprintf(f, "CALL\t0x%.8x %d", addr, nargs);
         int ret_addr = ip - bf->code_ptr;
         /* Нет замыкания */
-        s_push(vstack, BOX(0));
-        s_push(vstack, BOX(ret_addr));
+        s_push(BOX(0));
+        s_push(BOX(ret_addr));
         ip = bf->code_ptr + addr;
       } break;
 
@@ -609,10 +606,10 @@ void interpret(FILE *f, bytefile *bf) {
         int   nelems = INT;
         fprintf(f, "TAG\t%s %d", tag, nelems);
 
-        size_t x    = s_pop(vstack);
+        size_t x    = s_pop();
         int    hash = LtagHash(tag);
         int    y    = Btag((void *)x, hash, BOX(nelems));
-        s_push(vstack, y);
+        s_push(y);
       } break;
 
       case LO_2_ARRAY:
@@ -661,14 +658,14 @@ void interpret(FILE *f, bytefile *bf) {
         TODO;
       } break;
       case PATT_TYPE_FUN: {
-        size_t x = s_pop(vstack);
+        size_t x = s_pop();
         if (UNBOXED(x)) {
-          s_push(vstack, BOX(0));
+          s_push(BOX(0));
           break;
         }
         data  *obj = TO_DATA(x);
         size_t y   = TAG(obj->data_header) == CLOSURE_TAG ? 1 : 0;
-        s_push(vstack, BOX(y));
+        s_push(BOX(y));
       } break;
       default: FAIL; break;
       }
@@ -679,35 +676,35 @@ void interpret(FILE *f, bytefile *bf) {
       case BUILTIN_READ: {
         fprintf(f, "CALL\tLread");
         int x = Lread();
-        s_push(vstack, x);
+        s_push(x);
       } break;
 
       case BUILTIN_WRITE: {
         fprintf(f, "CALL\tLwrite");
-        size_t x = s_pop(vstack);
+        size_t x = s_pop();
         size_t y = Lwrite(x);
-        s_push(vstack, y);
+        s_push(y);
       } break;
 
       case BUILTIN_LENGTH: {
         fprintf(f, "CALL\tLlength");
-        size_t x = s_pop(vstack);
+        size_t x = s_pop();
         size_t y = Llength((void *)x);
-        s_push(vstack, y);
+        s_push(y);
       } break;
 
       case BUILTIN_STRING: {
         fprintf(f, "CALL\tLstring");
-        size_t x = s_pop(vstack);
+        size_t x = s_pop();
         size_t y = (size_t)Lstring((void *)x);
-        s_push(vstack, y);
+        s_push(y);
       } break;
 
       case BUILTIN_ARRAY: {
         int n = INT;
         fprintf(f, "CALL\tBarray\t%d", n);
-        size_t x = Warray(vstack, n);
-        s_push(vstack, x);
+        size_t x = Warray(n);
+        s_push(x);
       } break;
 
       default: FAIL;
@@ -718,7 +715,7 @@ void interpret(FILE *f, bytefile *bf) {
     }
 
     fprintf(f, "\n");
-  } while (1);
+  }
 
 stop:
   fprintf(f, "<end>\n");

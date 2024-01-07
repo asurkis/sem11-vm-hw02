@@ -14,10 +14,10 @@ extern size_t __gc_stack_top, __gc_stack_bottom;
   flag      = __gc_stack_top == 0;                                                                 \
   if (flag) { __gc_stack_top = (size_t)__builtin_frame_address(0); }                               \
   assert(__gc_stack_top != 0);                                                                     \
-  assert(__builtin_frame_address(0) <= (void *)__gc_stack_top);
+  /* assert(__builtin_frame_address(0) <= (void *)__gc_stack_top); */
 
 #define POST_GC()                                                                                  \
-  assert(__builtin_frame_address(0) <= (void *)__gc_stack_top);                                    \
+  /* assert(__builtin_frame_address(0) <= (void *)__gc_stack_top); */                              \
   if (flag) { __gc_stack_top = 0; }
 
 static void vfailure (char *s, va_list args) {
@@ -1251,8 +1251,8 @@ extern void set_args (int argc, char *argv[]) {
   POST_GC();
 
   global_sysargs = p;
-  global_stdout = stdout;
-  global_stderr = stderr;
+  global_stdout  = stdout;
+  global_stderr  = stderr;
 
   push_extra_root((void **)&global_sysargs);
 }
