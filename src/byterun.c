@@ -105,9 +105,9 @@ size_t Wsexp(char *tag, int n) {
 }
 
 size_t Wclosure(int entry, int n) {
-  data *obj        = alloc_closure(n + 1);
-  int  *arr        = (int *)obj->contents;
-  obj->contents[0] = entry;
+  data *obj = alloc_closure(n + 1);
+  int  *arr = (int *)obj->contents;
+  arr[0]    = entry;
   for (int i = 0; i < n; ++i) {
     size_t x   = s_pop();
     arr[n - i] = x;
@@ -193,9 +193,9 @@ enum {
 };
 
 /* Структура стекового фрейма:
+   - [Опционально] Объект замыкания
    - Аргументы функции
-   - Объект замыкания или 0
-   - Адрес возврата
+   - Адрес возврата в виде числа, ещё один бит сообщает о замыкании
    - Локальные переменные
    - Количество аргументов
    - Количество локальных переменных
@@ -210,6 +210,48 @@ enum {
    Будем добавлять 1 в младший бит указателей не на кучу Ламы,
    чтобы сборщик мусора считал их целыми числами. */
 
+/* Данные виртуальной машины будем хранить глобально,
+   чтобы можно было легко писать вспомогательные функции */
+size_t *p_globals = 0;
+size_t *p_args    = 0;
+size_t *p_locals  = 0;
+size_t *p_closed  = 0;
+
+int stack_nargs   = 0;
+int stack_nlocals = 0;
+
+size_t *p_stack_frame = 0;
+
+void do_begin() {
+  /* Адрес возврата, замыкание, аргументы */
+  size_t *stack_top = s_top();
+  p_args            = stack_top + stack_nargs;
+  size_t is_closure = stack_top[1];
+  if (UNBOX(is_closure)) {
+    /* Замыкание */
+    size_t closure = p_args[1];
+    data  *obj     = TO_DATA(closure);
+    p_closed       = (size_t *)obj->contents + 1;
+  } else {
+    /* Обычная функция, без замыкания */
+    p_closed = 0;
+  }
+
+  /* Выделим место для локальных переменных.
+     Их обязательно нужно занулять,
+     чтобы сборщик мусора не принимал
+     неинициализированные переменные за указатели. */
+  for (int i = 0; i < stack_nlocals; ++i) s_push(BOX(0));
+  p_locals = s_top();
+
+  s_push(BOX(stack_nargs));
+  s_push(BOX(stack_nlocals));
+
+  /* Где находится предыдущий стековый фрейм */
+  s_push((size_t)p_stack_frame | 1);
+  p_stack_frame = s_top();
+}
+
 void interpret(FILE *f, bytefile *bf) {
   __gc_init();
   __gc_stack_bottom = (size_t)s_top();
@@ -218,15 +260,7 @@ void interpret(FILE *f, bytefile *bf) {
   /* Будем хранить глобальные переменные также на стеке,
      чтобы их тоже видел сборщик мусора */
   for (int i = 0; i < bf->global_area_size; ++i) s_push(BOX(0));
-  size_t *p_globals = s_top();
-  size_t *p_args    = 0;
-  size_t *p_locals  = 0;
-  size_t *p_closed  = 0;
-
-  int stack_nargs   = 0;
-  int stack_nlocals = 0;
-
-  size_t *p_stack_frame = 0;
+  p_globals = s_top();
 
   /* Фиктивное замыкание и адрес возврата для главной функции */
   s_push(BOX(0));
@@ -334,9 +368,14 @@ void interpret(FILE *f, bytefile *bf) {
           /* Выходим из главной функции */
           goto stop;
         }
-        int frame_size = stack_nlocals + stack_nargs + 5;
+        int frame_size = stack_nlocals + stack_nargs + 4;
         int ret_addr   = UNBOX(p_stack_frame[3 + stack_nlocals]);
-        ip             = bf->code_ptr + ret_addr;
+        if (ret_addr & 1) {
+          /* Возврат из замыкания */
+          ++frame_size;
+        }
+        ret_addr /= 2;
+        ip = bf->code_ptr + ret_addr;
 
         /* Убираем текущий фрейм */
         for (int i = 0; i < frame_size; ++i) s_pop();
@@ -349,7 +388,7 @@ void interpret(FILE *f, bytefile *bf) {
         /* Можно переставлять местами аргументы при вызове,
            т.к. на вершине стека перед вызовом --- последний,
            но проще поменять знак при разыменовании */
-        p_args = p_locals + stack_nlocals + 1 + stack_nargs;
+        p_args = p_locals + stack_nlocals + stack_nargs;
 
         size_t is_closure = p_stack_frame[3 + stack_nlocals];
         if (UNBOX(is_closure)) {
@@ -416,7 +455,7 @@ void interpret(FILE *f, bytefile *bf) {
       } break;
       case MEM_C:
         fprintf(f, "C(%d)", pos);
-        TODO;
+        x = p_closed[pos];
         break;
       default: FAIL;
       }
@@ -426,25 +465,23 @@ void interpret(FILE *f, bytefile *bf) {
     case HI_LDA: {
       fprintf(f, "%s\t", lds[h - 2]);
       size_t *addr = 0;
+      int     i    = INT;
       switch (l) {
-      case MEM_G: {
-        int i = INT;
+      case MEM_G:
         fprintf(f, "G(%d)", i);
         addr = p_globals + i;
-      } break;
-      case MEM_L: {
-        int i = INT;
+        break;
+      case MEM_L:
         fprintf(f, "L(%d)", i);
         addr = p_locals + i;
-      } break;
-      case MEM_A: {
-        int i = INT;
+        break;
+      case MEM_A:
         fprintf(f, "A(%d)", i);
         addr = p_args - i;
-      } break;
+        break;
       case MEM_C:
-        fprintf(f, "C(%d)", INT);
-        TODO;
+        fprintf(f, "C(%d)", i);
+        addr = p_closed + i;
         break;
       default: FAIL;
       }
@@ -472,7 +509,7 @@ void interpret(FILE *f, bytefile *bf) {
         break;
       case MEM_C:
         fprintf(f, "C(%d)", pos);
-        TODO;
+        p_closed[pos] = x;
         break;
       default: FAIL;
       }
@@ -494,44 +531,21 @@ void interpret(FILE *f, bytefile *bf) {
         if (UNBOX(x) != 0) ip = bf->code_ptr + addr;
       } break;
 
-      case LO_2_BEGIN: {
+      case LO_2_BEGIN:
         stack_nargs   = INT;
         stack_nlocals = INT;
         fprintf(f, "BEGIN\t%d %d", stack_nargs, stack_nlocals);
-
-        /* Адрес возврата, замыкание, аргументы */
-        size_t *stack_top = s_top();
-        p_args            = stack_top + 1 + stack_nargs;
-        size_t is_closure = stack_top[1];
-        if (UNBOX(is_closure)) {
-          /* Замыкание */
-          size_t closure = p_args[1];
-          data  *obj     = TO_DATA(closure);
-          p_closed       = (size_t *)obj->contents + 1;
-        } else {
-          /* Обычная функция, без замыкания */
-          p_closed = 0;
-        }
-
-        /* Выделим место для локальных переменных.
-           Их обязательно нужно занулять,
-           чтобы сборщик мусора не принимал
-           неинициализированные переменные за указатели. */
-        for (int i = 0; i < stack_nlocals; ++i) s_push(BOX(0));
-        p_locals = s_top();
-
-        s_push(BOX(stack_nargs));
-        s_push(BOX(stack_nlocals));
-
-        /* Где находится предыдущий стековый фрейм */
-        s_push((size_t)p_stack_frame | 1);
-        p_stack_frame = s_top();
-      } break;
+        do_begin();
+        break;
 
       case LO_2_CBEGIN:
-        fprintf(f, "CBEGIN\t%d ", INT);
-        fprintf(f, "%d", INT);
-        TODO;
+        stack_nargs   = INT;
+        stack_nlocals = INT;
+        fprintf(f, "CBEGIN\t%d %d", stack_nargs, stack_nlocals);
+        /* Т.к. замыкание может быть ссылкой на функцию,
+           то его наличие на стеке придётся проверять и
+           в обычном BEGIN */
+        do_begin();
         break;
 
       case LO_2_CLOSURE: {
@@ -574,12 +588,13 @@ void interpret(FILE *f, bytefile *bf) {
       case LO_2_CALLC: {
         int nargs = INT;
         fprintf(f, "CALLC\t%d", nargs);
+        /* Снять замыкание со стека, если у него нет аргументов, здесь нельзя.
+           Придётся обрабатывать наличие замыкания в BEGIN */
         size_t closure  = ((size_t *)s_top())[nargs];
         data  *obj      = TO_DATA(closure);
         int   *arr      = (int *)obj->contents;
         int    addr     = arr[0];
-        int    ret_addr = ip - bf->code_ptr;
-        s_push(BOX(1));
+        int    ret_addr = 2 * (ip - bf->code_ptr) + 1;
         s_push(BOX(ret_addr));
         ip = bf->code_ptr + addr;
       } break;
@@ -588,9 +603,7 @@ void interpret(FILE *f, bytefile *bf) {
         int addr  = INT;
         int nargs = INT;
         fprintf(f, "CALL\t0x%.8x %d", addr, nargs);
-        int ret_addr = ip - bf->code_ptr;
-        /* Нет замыкания */
-        s_push(BOX(0));
+        int ret_addr = 2 * (ip - bf->code_ptr);
         s_push(BOX(ret_addr));
         ip = bf->code_ptr + addr;
       } break;
