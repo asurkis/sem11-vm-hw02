@@ -81,17 +81,6 @@ size_t s_pop() {
   return res;
 }
 
-/* runtime.h и runtime_common.h не экспортируют эти функции */
-extern void *Belem(void *p, int i);
-extern void *Bsta(void *v, int i, void *x);
-extern void *Bstring(void *);
-extern int   Btag(void *d, int t, int n);
-extern int   Llength(void *p);
-extern int   Lread();
-extern void *Lstring(void *p);
-extern int   LtagHash(char *s);
-extern int   Lwrite(int n);
-
 /* Barray, Bsexp и Bclosure не подходят, т.к. в них элементы передаются через varargs */
 size_t Warray(int n) {
   data *obj = alloc_array(n);
@@ -195,12 +184,12 @@ enum { MEM_G = 0, MEM_L, MEM_A, MEM_C };
 
 enum {
   PATT_EQ_STRING = 0,
-  PATT_TYPE_STRING,
-  PATT_TYPE_ARRAY,
-  PATT_TYPE_SEXP,
-  PATT_TYPE_REF,
-  PATT_TYPE_VAL,
-  PATT_TYPE_FUN,
+  PATT_TAG_STRING,
+  PATT_TAG_ARRAY,
+  PATT_TAG_SEXP,
+  PATT_TAG_REF,
+  PATT_TAG_VAL,
+  PATT_TAG_FUN,
 };
 
 /* Структура стекового фрейма:
@@ -362,14 +351,15 @@ void interpret(FILE *f, bytefile *bf) {
            но проще поменять знак при разыменовании */
         p_args = p_locals + stack_nlocals + 1 + stack_nargs;
 
-        size_t closure = p_stack_frame[3 + stack_nlocals];
-        if (closure == BOX(0)) {
+        size_t is_closure = p_stack_frame[3 + stack_nlocals];
+        if (UNBOX(is_closure)) {
+          /* Вернулись в замыкание */
+          size_t closure = p_args[1];
+          data  *obj     = TO_DATA(closure);
+          p_closed       = (size_t *)obj->contents + 1;
+        } else {
           /* Вернулись в обычную функцию */
           p_closed = 0;
-        } else {
-          /* Вернулись в замыкание */
-          data *obj = TO_DATA(closure);
-          p_closed  = (size_t *)obj->contents + 1;
         }
         s_push(retval);
       } break;
@@ -459,7 +449,7 @@ void interpret(FILE *f, bytefile *bf) {
       default: FAIL;
       }
       size_t pos = addr - stack_data;
-      s_push(BOX(pos) | 0x40000001);
+      s_push(BOX(pos) | 0x40000000);
     } break;
 
     case HI_ST: {
@@ -478,7 +468,7 @@ void interpret(FILE *f, bytefile *bf) {
         break;
       case MEM_A:
         fprintf(f, "A(%d)", pos);
-        TODO;
+        p_args[-pos] = x;
         break;
       case MEM_C:
         fprintf(f, "C(%d)", pos);
@@ -511,18 +501,22 @@ void interpret(FILE *f, bytefile *bf) {
 
         /* Адрес возврата, замыкание, аргументы */
         size_t *stack_top = s_top();
-        size_t  closure   = stack_top[1];
-        if (closure == BOX(0)) {
+        p_args            = stack_top + 1 + stack_nargs;
+        size_t is_closure = stack_top[1];
+        if (UNBOX(is_closure)) {
+          /* Замыкание */
+          size_t closure = p_args[1];
+          data  *obj     = TO_DATA(closure);
+          p_closed       = (size_t *)obj->contents + 1;
+        } else {
           /* Обычная функция, без замыкания */
           p_closed = 0;
-        } else {
-          /* Замыкание */
-          data *obj = TO_DATA(closure);
-          p_closed  = (size_t *)obj->contents + 1;
         }
-        p_args = stack_top + 1 + stack_nargs;
 
-        /* Выделим место для локальных переменных */
+        /* Выделим место для локальных переменных.
+           Их обязательно нужно занулять,
+           чтобы сборщик мусора не принимал
+           неинициализированные переменные за указатели. */
         for (int i = 0; i < stack_nlocals; ++i) s_push(BOX(0));
         p_locals = s_top();
 
@@ -580,12 +574,12 @@ void interpret(FILE *f, bytefile *bf) {
       case LO_2_CALLC: {
         int nargs = INT;
         fprintf(f, "CALLC\t%d", nargs);
-        /* Не снимаем со стека */
-        size_t closure  = *(size_t *)s_top();
+        size_t closure  = ((size_t *)s_top())[nargs];
         data  *obj      = TO_DATA(closure);
         int   *arr      = (int *)obj->contents;
         int    addr     = arr[0];
         int    ret_addr = ip - bf->code_ptr;
+        s_push(BOX(1));
         s_push(BOX(ret_addr));
         ip = bf->code_ptr + addr;
       } break;
@@ -612,10 +606,13 @@ void interpret(FILE *f, bytefile *bf) {
         s_push(y);
       } break;
 
-      case LO_2_ARRAY:
-        fprintf(f, "ARRAY\t%d", INT);
-        TODO;
-        break;
+      case LO_2_ARRAY: {
+        int n = INT;
+        fprintf(f, "ARRAY\t%d", n);
+        size_t x = s_pop();
+        size_t y = Barray_patt((void *)x, BOX(n));
+        s_push(y);
+      } break;
 
       case LO_2_FAIL: {
         int line = INT;
@@ -640,32 +637,41 @@ void interpret(FILE *f, bytefile *bf) {
       fprintf(f, "PATT\t%s", pats[l]);
       switch (l) {
       case PATT_EQ_STRING: {
-        TODO;
-      } break;
-      case PATT_TYPE_STRING: {
-        TODO;
-      } break;
-      case PATT_TYPE_ARRAY: {
-        TODO;
-      } break;
-      case PATT_TYPE_SEXP: {
-        TODO;
-      } break;
-      case PATT_TYPE_REF: {
-        TODO;
-      } break;
-      case PATT_TYPE_VAL: {
-        TODO;
-      } break;
-      case PATT_TYPE_FUN: {
+        size_t y = s_pop();
         size_t x = s_pop();
-        if (UNBOXED(x)) {
-          s_push(BOX(0));
-          break;
-        }
-        data  *obj = TO_DATA(x);
-        size_t y   = TAG(obj->data_header) == CLOSURE_TAG ? 1 : 0;
-        s_push(BOX(y));
+        size_t z = Bstring_patt((void *)x, (void *)y);
+        s_push(z);
+      } break;
+      case PATT_TAG_STRING: {
+        size_t x = s_pop();
+        size_t y = Bstring_tag_patt((void *)x);
+        s_push(y);
+      } break;
+      case PATT_TAG_ARRAY: {
+        size_t x = s_pop();
+        size_t y = Barray_tag_patt((void *)x);
+        s_push(y);
+      } break;
+      case PATT_TAG_SEXP: {
+        size_t x = s_pop();
+        size_t y = Bsexp_tag_patt((void *)x);
+        s_push(y);
+      } break;
+      case PATT_TAG_REF: {
+        size_t x = s_pop();
+        size_t y = Bboxed_patt((void *)x);
+        s_push(y);
+        TODO;
+      } break;
+      case PATT_TAG_VAL: {
+        size_t x = s_pop();
+        size_t y = Bunboxed_patt((void *)x);
+        s_push(y);
+      } break;
+      case PATT_TAG_FUN: {
+        size_t x = s_pop();
+        size_t y = Bclosure_tag_patt((void *)x);
+        s_push(y);
       } break;
       default: FAIL; break;
       }
