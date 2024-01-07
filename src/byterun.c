@@ -252,7 +252,7 @@ void do_begin() {
   p_stack_frame = s_top();
 }
 
-void interpret(FILE *f, bytefile *bf) {
+void interpret(bytefile *bf) {
   __gc_init();
   __gc_stack_bottom = (size_t)s_top();
   __gc_stack_top    = __gc_stack_bottom;
@@ -270,7 +270,7 @@ void interpret(FILE *f, bytefile *bf) {
 #define BYTE *ip++
 #define STRING get_string(bf, INT)
 #define FAIL failure("ERROR: invalid opcode %d-%d\n", h, l)
-#define TODO failure("Unimplemented, line %d\n", __LINE__)
+#define UNUSED failure("Unused instruction, line %d\n", __LINE__)
 
   char        *ip     = bf->code_ptr;
   static char *ops[]  = {"+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=", "&&", "!!"};
@@ -278,13 +278,11 @@ void interpret(FILE *f, bytefile *bf) {
   static char *lds[]  = {"LD", "LDA", "ST"};
   for (;;) {
     char opcode = BYTE, h = (opcode & 0xF0) >> 4, l = opcode & 0x0F;
-    fprintf(f, "0x%.8lx:\t", ip - bf->code_ptr - 1);
 
     switch (h) {
     case HI_STOP: goto stop;
 
     case HI_BINOP: {
-      fprintf(f, "BINOP\t%s", ops[l - 1]);
       int y = UNBOX(s_pop());
       int x = UNBOX(s_pop());
       int z = 0;
@@ -310,32 +308,25 @@ void interpret(FILE *f, bytefile *bf) {
       switch (l) {
       case LO_1_CONST: {
         int x = INT;
-        fprintf(f, "CONST\t%d", x);
         s_push(BOX(x));
       } break;
 
       case LO_1_STRING: {
         char *cstr = STRING;
-        fprintf(f, "STRING\t%s", cstr);
-        void *str = Bstring(cstr);
+        void *str  = Bstring(cstr);
         s_push((size_t)str);
       } break;
 
       case LO_1_SEXP: {
-        char *tag    = STRING;
-        int   nelems = INT;
-        fprintf(f, "SEXP\t%s %d", tag, nelems);
-        size_t x = Wsexp(tag, nelems);
+        char  *tag    = STRING;
+        int    nelems = INT;
+        size_t x      = Wsexp(tag, nelems);
         s_push(x);
       } break;
 
-      case LO_1_STI:
-        fprintf(f, "STI");
-        TODO;
-        break;
+      case LO_1_STI: UNUSED; break;
 
       case LO_1_STA: {
-        fprintf(f, "STA");
         size_t v = s_pop();
         size_t i = s_pop();
         /* Будем различать адреса переменных и индексы по старшему
@@ -355,13 +346,10 @@ void interpret(FILE *f, bytefile *bf) {
 
       case LO_1_JMP: {
         int addr = INT;
-        fprintf(f, "JMP\t0x%.8x", addr);
-        ip = bf->code_ptr + addr;
+        ip       = bf->code_ptr + addr;
       } break;
 
       case LO_1_END: {
-        fprintf(f, "END");
-
         size_t  retval       = s_pop();
         size_t *p_prev_frame = (size_t *)((size_t)*p_stack_frame & ~1);
         if (p_prev_frame == 0) {
@@ -403,29 +391,18 @@ void interpret(FILE *f, bytefile *bf) {
         s_push(retval);
       } break;
 
-      case LO_1_RET:
-        fprintf(f, "RET");
-        TODO;
-        break;
+      case LO_1_RET: UNUSED; break;
 
-      case LO_1_DROP:
-        fprintf(f, "DROP");
-        s_pop();
-        break;
+      case LO_1_DROP: s_pop(); break;
 
       case LO_1_DUP: {
-        fprintf(f, "DUP");
         size_t x = *(size_t *)s_top();
         s_push(x);
       } break;
 
-      case LO_1_SWAP:
-        fprintf(f, "SWAP");
-        TODO;
-        break;
+      case LO_1_SWAP: UNUSED; break;
 
       case LO_1_ELEM: {
-        fprintf(f, "ELEM");
         size_t i = s_pop();
         size_t p = s_pop();
         size_t y = (size_t)Belem((void *)p, i);
@@ -437,52 +414,32 @@ void interpret(FILE *f, bytefile *bf) {
       break;
 
     case HI_LD: {
-      fprintf(f, "%s\t", lds[h - 2]);
       int    pos = INT;
       size_t x   = 0;
       switch (l) {
       case MEM_G: {
-        fprintf(f, "G(%d)", pos);
         x = p_globals[pos];
       } break;
       case MEM_L: {
-        fprintf(f, "L(%d)", pos);
         x = p_locals[pos];
       } break;
       case MEM_A: {
-        fprintf(f, "A(%d)", pos);
         x = p_args[-pos];
       } break;
-      case MEM_C:
-        fprintf(f, "C(%d)", pos);
-        x = p_closed[pos];
-        break;
+      case MEM_C: x = p_closed[pos]; break;
       default: FAIL;
       }
       s_push(x);
     } break;
 
     case HI_LDA: {
-      fprintf(f, "%s\t", lds[h - 2]);
       size_t *addr = 0;
       int     i    = INT;
       switch (l) {
-      case MEM_G:
-        fprintf(f, "G(%d)", i);
-        addr = p_globals + i;
-        break;
-      case MEM_L:
-        fprintf(f, "L(%d)", i);
-        addr = p_locals + i;
-        break;
-      case MEM_A:
-        fprintf(f, "A(%d)", i);
-        addr = p_args - i;
-        break;
-      case MEM_C:
-        fprintf(f, "C(%d)", i);
-        addr = p_closed + i;
-        break;
+      case MEM_G: addr = p_globals + i; break;
+      case MEM_L: addr = p_locals + i; break;
+      case MEM_A: addr = p_args - i; break;
+      case MEM_C: addr = p_closed + i; break;
       default: FAIL;
       }
       size_t pos = addr - stack_data;
@@ -493,24 +450,11 @@ void interpret(FILE *f, bytefile *bf) {
       int    pos = INT;
       size_t x   = *(size_t *)s_top();
 
-      fprintf(f, "%s\t", lds[h - 2]);
       switch (l) {
-      case MEM_G:
-        fprintf(f, "G(%d)", pos);
-        p_globals[pos] = x;
-        break;
-      case MEM_L:
-        fprintf(f, "L(%d)", pos);
-        p_locals[pos] = x;
-        break;
-      case MEM_A:
-        fprintf(f, "A(%d)", pos);
-        p_args[-pos] = x;
-        break;
-      case MEM_C:
-        fprintf(f, "C(%d)", pos);
-        p_closed[pos] = x;
-        break;
+      case MEM_G: p_globals[pos] = x; break;
+      case MEM_L: p_locals[pos] = x; break;
+      case MEM_A: p_args[-pos] = x; break;
+      case MEM_C: p_closed[pos] = x; break;
       default: FAIL;
       }
     } break;
@@ -518,30 +462,26 @@ void interpret(FILE *f, bytefile *bf) {
     case HI_2:
       switch (l) {
       case LO_2_CJMP_Z: {
-        int addr = INT;
-        fprintf(f, "CJMPz\t0x%.8x", addr);
-        size_t x = s_pop();
+        int    addr = INT;
+        size_t x    = s_pop();
         if (UNBOX(x) == 0) ip = bf->code_ptr + addr;
       } break;
 
       case LO_2_CJMP_NZ: {
-        int addr = INT;
-        fprintf(f, "CJMPnz\t0x%.8x", addr);
-        size_t x = s_pop();
+        int    addr = INT;
+        size_t x    = s_pop();
         if (UNBOX(x) != 0) ip = bf->code_ptr + addr;
       } break;
 
       case LO_2_BEGIN:
         stack_nargs   = INT;
         stack_nlocals = INT;
-        fprintf(f, "BEGIN\t%d %d", stack_nargs, stack_nlocals);
         do_begin();
         break;
 
       case LO_2_CBEGIN:
         stack_nargs   = INT;
         stack_nlocals = INT;
-        fprintf(f, "CBEGIN\t%d %d", stack_nargs, stack_nlocals);
         /* Т.к. замыкание может быть ссылкой на функцию,
            то его наличие на стеке придётся проверять и
            в обычном BEGIN */
@@ -550,32 +490,19 @@ void interpret(FILE *f, bytefile *bf) {
 
       case LO_2_CLOSURE: {
         int entry = INT;
-        fprintf(f, "CLOSURE\t0x%.8x", entry);
-        int n = INT;
+        int n     = INT;
         for (int i = 0; i < n; i++) {
           char   pos_type = BYTE;
           int    pos      = INT;
           size_t x        = 0;
           switch (pos_type) {
-          case MEM_G:
-            fprintf(f, "G(%d)", pos);
-            x = p_globals[pos];
-            break;
+          case MEM_G: x = p_globals[pos]; break;
 
-          case MEM_L:
-            fprintf(f, "L(%d)", pos);
-            x = p_locals[pos];
-            break;
+          case MEM_L: x = p_locals[pos]; break;
 
-          case MEM_A:
-            fprintf(f, "A(%d)", pos);
-            x = p_args[-pos];
-            break;
+          case MEM_A: x = p_args[-pos]; break;
 
-          case MEM_C:
-            fprintf(f, "C(%d)", pos);
-            x = p_closed[pos];
-            break;
+          case MEM_C: x = p_closed[pos]; break;
 
           default: FAIL;
           }
@@ -587,7 +514,6 @@ void interpret(FILE *f, bytefile *bf) {
 
       case LO_2_CALLC: {
         int nargs = INT;
-        fprintf(f, "CALLC\t%d", nargs);
         /* Снять замыкание со стека, если у него нет аргументов, здесь нельзя.
            Придётся обрабатывать наличие замыкания в BEGIN */
         size_t closure  = ((size_t *)s_top())[nargs];
@@ -600,9 +526,8 @@ void interpret(FILE *f, bytefile *bf) {
       } break;
 
       case LO_2_CALL: {
-        int addr  = INT;
-        int nargs = INT;
-        fprintf(f, "CALL\t0x%.8x %d", addr, nargs);
+        int addr     = INT;
+        int nargs    = INT;
         int ret_addr = 2 * (ip - bf->code_ptr);
         s_push(BOX(ret_addr));
         ip = bf->code_ptr + addr;
@@ -611,7 +536,6 @@ void interpret(FILE *f, bytefile *bf) {
       case LO_2_TAG: {
         char *tag    = STRING;
         int   nelems = INT;
-        fprintf(f, "TAG\t%s %d", tag, nelems);
 
         size_t x    = s_pop();
         int    hash = LtagHash(tag);
@@ -620,8 +544,7 @@ void interpret(FILE *f, bytefile *bf) {
       } break;
 
       case LO_2_ARRAY: {
-        int n = INT;
-        fprintf(f, "ARRAY\t%d", n);
+        int    n = INT;
         size_t x = s_pop();
         size_t y = Barray_patt((void *)x, BOX(n));
         s_push(y);
@@ -630,16 +553,13 @@ void interpret(FILE *f, bytefile *bf) {
       case LO_2_FAIL: {
         int line = INT;
         int col  = INT;
-        fprintf(f, "FAIL\t%d %d", line, col);
         failure("%d:%d\n", line, col);
-        TODO;
       } break;
 
       case LO_2_LINE: {
         /* LINE INT
            Игнорируем эту инструкцию, также как и в исходной реализации Ламы */
         int arg = INT;
-        fprintf(f, "LINE\t%d", arg);
       } break;
 
       default: FAIL;
@@ -647,7 +567,6 @@ void interpret(FILE *f, bytefile *bf) {
       break;
 
     case HI_PATT:
-      fprintf(f, "PATT\t%s", pats[l]);
       switch (l) {
       case PATT_EQ_STRING: {
         size_t y = s_pop();
@@ -674,7 +593,6 @@ void interpret(FILE *f, bytefile *bf) {
         size_t x = s_pop();
         size_t y = Bboxed_patt((void *)x);
         s_push(y);
-        TODO;
       } break;
       case PATT_TAG_VAL: {
         size_t x = s_pop();
@@ -693,35 +611,30 @@ void interpret(FILE *f, bytefile *bf) {
     case HI_BUILTIN: {
       switch (l) {
       case BUILTIN_READ: {
-        fprintf(f, "CALL\tLread");
         int x = Lread();
         s_push(x);
       } break;
 
       case BUILTIN_WRITE: {
-        fprintf(f, "CALL\tLwrite");
         size_t x = s_pop();
         size_t y = Lwrite(x);
         s_push(y);
       } break;
 
       case BUILTIN_LENGTH: {
-        fprintf(f, "CALL\tLlength");
         size_t x = s_pop();
         size_t y = Llength((void *)x);
         s_push(y);
       } break;
 
       case BUILTIN_STRING: {
-        fprintf(f, "CALL\tLstring");
         size_t x = s_pop();
         size_t y = (size_t)Lstring((void *)x);
         s_push(y);
       } break;
 
       case BUILTIN_ARRAY: {
-        int n = INT;
-        fprintf(f, "CALL\tBarray\t%d", n);
+        int    n = INT;
         size_t x = Warray(n);
         s_push(x);
       } break;
@@ -732,18 +645,15 @@ void interpret(FILE *f, bytefile *bf) {
 
     default: FAIL;
     }
-
-    fprintf(f, "\n");
   }
 
 stop:
-  fprintf(f, "<end>\n");
   __shutdown();
 }
 
 int main(int argc, char *argv[]) {
   bytefile *f = read_file(argv[1]);
-  interpret(stderr, f);
+  interpret(f);
   free(f->global_ptr);
   free(f);
   return 0;
