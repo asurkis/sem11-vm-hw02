@@ -1,0 +1,11 @@
+Оригинальная реализация Ламы:
+
+Sort
+LAMA=../runtime ../src/lamac  Sort.lama && `which time` -f "Sort\t%U" ./Sort
+Sort    1.75
+
+Реализованная в домашней работе:
+
+Sort
+`which time` -f "Sort\t%U" ../src/lama-impl Sort.bc
+Sort    4.76
