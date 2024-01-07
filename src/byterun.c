@@ -120,8 +120,8 @@ size_t Wsexp(virt_stack *st, char *tag, int n) {
 }
 
 size_t Wclosure(virt_stack *st, int entry, int n) {
-  data *obj = alloc_closure(n + 1);
-  int  *arr = (int *)obj->contents;
+  data *obj        = alloc_closure(n + 1);
+  int  *arr        = (int *)obj->contents;
   obj->contents[0] = entry;
   for (int i = 0; i < n; ++i) {
     size_t x   = s_pop(st);
@@ -196,6 +196,16 @@ enum {
 };
 
 enum { MEM_G = 0, MEM_L, MEM_A, MEM_C };
+
+enum {
+  PATT_EQ_STRING = 0,
+  PATT_TYPE_STRING,
+  PATT_TYPE_ARRAY,
+  PATT_TYPE_SEXP,
+  PATT_TYPE_REF,
+  PATT_TYPE_VAL,
+  PATT_TYPE_FUN,
+};
 
 /* Структура стекового фрейма:
    - Аргументы функции
@@ -629,7 +639,37 @@ void interpret(FILE *f, bytefile *bf) {
 
     case HI_PATT:
       fprintf(f, "PATT\t%s", pats[l]);
-      TODO;
+      switch (l) {
+      case PATT_EQ_STRING: {
+        TODO;
+      } break;
+      case PATT_TYPE_STRING: {
+        TODO;
+      } break;
+      case PATT_TYPE_ARRAY: {
+        TODO;
+      } break;
+      case PATT_TYPE_SEXP: {
+        TODO;
+      } break;
+      case PATT_TYPE_REF: {
+        TODO;
+      } break;
+      case PATT_TYPE_VAL: {
+        TODO;
+      } break;
+      case PATT_TYPE_FUN: {
+        size_t x = s_pop(vstack);
+        if (UNBOXED(x)) {
+          s_push(vstack, BOX(0));
+          break;
+        }
+        data  *obj = TO_DATA(x);
+        size_t y   = TAG(obj->data_header) == CLOSURE_TAG ? 1 : 0;
+        s_push(vstack, BOX(y));
+      } break;
+      default: FAIL; break;
+      }
       break;
 
     case HI_BUILTIN: {
