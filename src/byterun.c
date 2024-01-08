@@ -9,23 +9,33 @@
 #include <stdio.h>
 #include <string.h>
 
+#define ASSERT_MSG(cond, ...)                                                                      \
+  do {                                                                                             \
+    if (!(cond)) failure(__VA_ARGS__);                                                             \
+  } while (0)
+
+#define ASSERT(cond) ASSERT_MSG(cond, "Assertion failed at line %d: %s\n", __LINE__, #cond)
+
 void *__stop_custom_data  = 0;
 void *__start_custom_data = 0;
 
 /* The unpacked representation of bytecode file */
 typedef struct {
-  char *string_ptr; /* A pointer to the beginning of the string table */
-  int  *public_ptr; /* A pointer to the beginning of publics table    */
-  char *code_ptr; /* A pointer to the bytecode itself               */
-  int  *global_ptr; /* A pointer to the global area                   */
-  int   stringtab_size; /* The size (in bytes) of the string table        */
-  int   global_area_size; /* The size (in words) of global area             */
-  int   public_symbols_number; /* The number of public symbols                   */
-  char  buffer[0];
+  char          *string_ptr; /* A pointer to the beginning of the string tablei */
+  int           *public_ptr; /* A pointer to the beginning of publics tablei */
+  unsigned char *code_ptr; /* A pointer to the bytecode itselfi */
+  long           size;
+  int            stringtab_size; /* The size (in bytes) of the string tablei */
+  int            global_area_size; /* The size (in words) of global areai */
+  int            public_symbols_number; /* The number of public symbolsi */
+  unsigned char  buffer[0];
 } bytefile;
 
 /* Gets a string from a string table by an index */
-char *get_string (bytefile *f, int pos) { return &f->string_ptr[pos]; }
+char *get_string (bytefile *f, int pos) {
+  ASSERT((size_t)pos < f->stringtab_size);
+  return &f->string_ptr[pos];
+}
 
 /* Gets a name for a public symbol */
 char *get_public_name (bytefile *f, int i) { return get_string(f, f->public_ptr[i * 2]); }
@@ -43,7 +53,7 @@ bytefile *read_file (char *fname) {
 
   if (fseek(f, 0, SEEK_END) == -1) { failure("%s\n", strerror(errno)); }
 
-  file = (bytefile *)malloc(sizeof(int) * 4 + (size = ftell(f)));
+  file = (bytefile *)malloc(sizeof(int) * 3 + sizeof(long) + (size = ftell(f)));
 
   if (file == 0) { failure("*** FAILURE: unable to allocate memory.\n"); }
 
@@ -53,10 +63,10 @@ bytefile *read_file (char *fname) {
 
   fclose(f);
 
-  file->string_ptr = &file->buffer[file->public_symbols_number * 2 * sizeof(int)];
+  file->size       = size;
   file->public_ptr = (int *)file->buffer;
-  file->code_ptr   = &file->string_ptr[file->stringtab_size];
-  file->global_ptr = (int *)malloc(file->global_area_size * sizeof(int));
+  file->string_ptr = (char *)(file->public_ptr + 2 * file->public_symbols_number);
+  file->code_ptr   = (unsigned char *)&file->string_ptr[file->stringtab_size];
 
   return file;
 }
@@ -152,27 +162,33 @@ extern size_t __gc_stack_top, __gc_stack_bottom;
 #define STACK_SIZE (512 * 1024) /* 2 МБ стека, должно хватить на всё */
 static size_t stack_data[STACK_SIZE];
 
+typedef struct {
+  size_t *p;
+  size_t  n;
+} slice_size_t;
+
+typedef struct {
+  unsigned char *p;
+  size_t         n;
+} slice_uchar;
+
 /* Данные виртуальной машины будем хранить глобально,
    чтобы можно было легко писать вспомогательные функции,
    тем более что всё равно нужен глобальный стек */
-static size_t *p_globals = 0;
-static size_t *p_args    = 0;
-static size_t *p_locals  = 0;
-static size_t *p_closed  = 0;
-
-static int nglobal    = 0;
-static int fn_nlocals = 0;
-static int fn_nargs   = 0;
-static int fn_nclosed = 0;
+static slice_size_t globals = {};
+static slice_size_t args    = {};
+static slice_size_t locals  = {};
+static slice_size_t closed  = {};
 
 static size_t *p_stack_frame = 0;
 
-static char *p_instr = 0;
+slice_uchar           code    = {};
+static unsigned char *p_instr = 0;
 
 static inline size_t *s_top () { return (size_t *)__gc_stack_top + 1; }
 
 static inline void s_push (size_t x) {
-  if (__gc_stack_top < (size_t)stack_data) failure("Stack overflow\n");
+  ASSERT_MSG(__gc_stack_top >= (size_t)stack_data, "Stack overflow\n");
   *(size_t *)__gc_stack_top = x;
   __gc_stack_top -= sizeof(size_t);
 }
@@ -180,21 +196,32 @@ static inline void s_push (size_t x) {
 static inline size_t s_pop () {
   __gc_stack_top += sizeof(size_t);
   /* Глобальные переменные никогда не должны быть сняты со стека */
-  if (__gc_stack_top >= (size_t)p_globals) failure("Stack underflow\n");
+  ASSERT_MSG(__gc_stack_top < (size_t)globals.p, "Stack underflow\n");
   size_t res = *(size_t *)__gc_stack_top;
   return res;
 }
 
+static inline void checked_jmp (size_t addr) {
+  ASSERT(addr < code.n);
+  p_instr = code.p + addr;
+}
+
 static inline size_t n_vars (int mem_type) {
   switch (mem_type) {
-    case MEM_G: return nglobal;
-    case MEM_L: return fn_nlocals;
-    case MEM_A: return fn_nargs;
-    case MEM_C: return fn_nclosed;
+    case MEM_G: return globals.n;
+    case MEM_L: return locals.n;
+    case MEM_A: return args.n;
+    case MEM_C: return closed.n;
     default:
       failure("Incorrect memory type: %d\n", mem_type);
       return 0; /* Подавляем предупреждение компилятора */
   }
+}
+
+static inline void check_nvars (int mem_type, int i) {
+  size_t n = n_vars(mem_type);
+  ASSERT_MSG(
+      (size_t)i < n, "Addressing %dth variable of type %d when only %d exist\n", i, mem_type, n);
 }
 
 /* Barray, Bsexp и Bclosure не подходят, т.к. в них элементы передаются через varargs */
@@ -252,29 +279,29 @@ static size_t Wclosure (int entry, int n) {
 static inline void do_begin () {
   /* Адрес возврата, замыкание, аргументы */
   size_t *stack_top = s_top();
-  p_args            = stack_top + fn_nargs;
+  args.p            = stack_top + args.n;
   int ret_addr      = stack_top[0];
   if (ret_addr & 0x80000000) {
     /* Замыкание */
-    size_t closure = p_args[1];
+    size_t closure = args.p[1];
     data  *obj     = TO_DATA(closure);
-    fn_nclosed     = LEN(obj->data_header) - 1;
-    p_closed       = (size_t *)obj->contents + 1;
+    closed.n       = LEN(obj->data_header) - 1;
+    closed.p       = (size_t *)obj->contents + 1;
   } else {
     /* Обычная функция, без замыкания */
-    fn_nclosed = 0;
-    p_closed   = 0;
+    closed.n = 0;
+    closed.p = 0;
   }
 
   /* Выделим место для локальных переменных.
      Их обязательно нужно занулять,
      чтобы сборщик мусора не принимал
      неинициализированные переменные за указатели. */
-  for (int i = 0; i < fn_nlocals; ++i) s_push(0);
-  p_locals = s_top();
+  for (int i = 0; i < locals.n; ++i) s_push(0);
+  locals.p = s_top();
 
-  s_push(BOX(fn_nargs));
-  s_push(BOX(fn_nlocals));
+  s_push(BOX(args.n));
+  s_push(BOX(locals.n));
 
   /* Где находится предыдущий стековый фрейм */
   s_push((size_t)p_stack_frame);
@@ -289,8 +316,8 @@ static void interpret (bytefile *bf) {
   /* Будем хранить глобальные переменные также на стеке,
      чтобы их тоже видел сборщик мусора */
   for (int i = 0; i < bf->global_area_size; ++i) s_push(0);
-  p_globals = s_top();
-  nglobal   = bf->global_area_size;
+  globals.p = s_top();
+  globals.n = bf->global_area_size;
 
   /* Фиктивный адрес возврата для главной функции */
   s_push(0);
@@ -301,10 +328,12 @@ static void interpret (bytefile *bf) {
 #define FAIL failure("ERROR: invalid opcode %d-%d\n", h, l)
 #define UNUSED failure("Unused instruction, line %d\n", __LINE__)
 
-  p_instr = bf->code_ptr;
+  code.p  = bf->code_ptr;
+  code.n  = (unsigned char *)bf->buffer + bf->size - bf->code_ptr;
+  p_instr = code.p;
 
   for (;;) {
-    char opcode = BYTE, h = (opcode & 0xF0) >> 4, l = opcode & 0x0F;
+    unsigned char opcode = BYTE, h = (opcode & 0xF0) >> 4, l = opcode & 0x0F;
 
     switch (h) {
       case HI_STOP: goto stop;
@@ -365,7 +394,7 @@ static void interpret (bytefile *bf) {
 
           case LO_1_JMP: {
             int addr = INT;
-            p_instr  = bf->code_ptr + addr;
+            checked_jmp(addr);
           } break;
 
           case LO_1_END: {
@@ -375,39 +404,39 @@ static void interpret (bytefile *bf) {
               /* Выходим из главной функции */
               goto stop;
             }
-            int frame_size = fn_nlocals + fn_nargs + 4;
-            int ret_addr   = p_stack_frame[3 + fn_nlocals];
+            int frame_size = locals.n + args.n + 4;
+            int ret_addr   = p_stack_frame[3 + locals.n];
             if (ret_addr & 0x80000000) {
               /* Возврат из замыкания */
               ++frame_size;
               ret_addr &= 0x7FFFFFFF;
             }
-            p_instr = bf->code_ptr + ret_addr;
+            checked_jmp(ret_addr);
 
             /* Убираем текущий фрейм */
             for (int i = 0; i < frame_size; ++i) s_pop();
             p_stack_frame = p_prev_frame;
 
-            fn_nlocals = UNBOX(p_stack_frame[1]);
-            fn_nargs   = UNBOX(p_stack_frame[2]);
+            locals.n = UNBOX(p_stack_frame[1]);
+            args.n   = UNBOX(p_stack_frame[2]);
 
-            p_locals = p_stack_frame + 3;
+            locals.p = p_stack_frame + 3;
             /* Можно переставлять местами аргументы при вызове,
                т.к. на вершине стека перед вызовом --- последний,
                но проще поменять знак при разыменовании */
-            p_args = p_locals + fn_nlocals + fn_nargs;
+            args.p = locals.p + locals.n + args.n;
 
-            ret_addr = p_stack_frame[3 + fn_nlocals];
+            ret_addr = p_stack_frame[3 + locals.n];
             if (ret_addr & 0x80000000) {
               /* Вернулись в замыкание */
-              size_t closure = p_args[1];
+              size_t closure = args.p[1];
               data  *obj     = TO_DATA(closure);
-              fn_nclosed     = LEN(obj->data_header) - 1;
-              p_closed       = (size_t *)obj->contents + 1;
+              closed.n       = LEN(obj->data_header) - 1;
+              closed.p       = (size_t *)obj->contents + 1;
             } else {
               /* Вернулись в обычную функцию */
-              fn_nclosed = 0;
-              p_closed   = 0;
+              closed.n = 0;
+              closed.p = 0;
             }
             s_push(retval);
           } break;
@@ -435,18 +464,15 @@ static void interpret (bytefile *bf) {
         break;
 
       case HI_LD: {
-        int i = INT;
-
-        size_t n = n_vars(l);
-        if (i < 0 || i >= n)
-          failure("Addressing %dth variable of type %d when only %d exist\n", i, l, n);
-
+        int    i = INT;
         size_t x = 0;
+        check_nvars(l, i);
+
         switch (l) {
-          case MEM_G: x = p_globals[i]; break;
-          case MEM_L: x = p_locals[i]; break;
-          case MEM_A: x = p_args[-i]; break;
-          case MEM_C: x = p_closed[i]; break;
+          case MEM_G: x = globals.p[i]; break;
+          case MEM_L: x = locals.p[i]; break;
+          case MEM_A: x = args.p[-i]; break;
+          case MEM_C: x = closed.p[i]; break;
           default: FAIL;
         }
         s_push(x);
@@ -455,16 +481,13 @@ static void interpret (bytefile *bf) {
       case HI_LDA: {
         size_t *addr = 0;
         int     i    = INT;
-
-        size_t n = n_vars(l);
-        if (i < 0 || i >= n)
-          failure("Addressing %dth variable of type %d when only %d exist\n", i, l, n);
+        check_nvars(l, i);
 
         switch (l) {
-          case MEM_G: addr = p_globals + i; break;
-          case MEM_L: addr = p_locals + i; break;
-          case MEM_A: addr = p_args - i; break;
-          case MEM_C: addr = p_closed + i; break;
+          case MEM_G: addr = globals.p + i; break;
+          case MEM_L: addr = locals.p + i; break;
+          case MEM_A: addr = args.p - i; break;
+          case MEM_C: addr = closed.p + i; break;
           default: FAIL;
         }
         size_t pos = addr - stack_data;
@@ -473,17 +496,14 @@ static void interpret (bytefile *bf) {
 
       case HI_ST: {
         int i = INT;
-
-        size_t n = n_vars(l);
-        if (i < 0 || i >= n)
-          failure("Addressing %dth variable of type %d when only %d exist\n", i, l, n);
+        check_nvars(l, i);
 
         size_t x = *(size_t *)s_top();
         switch (l) {
-          case MEM_G: p_globals[i] = x; break;
-          case MEM_L: p_locals[i] = x; break;
-          case MEM_A: p_args[-i] = x; break;
-          case MEM_C: p_closed[i] = x; break;
+          case MEM_G: globals.p[i] = x; break;
+          case MEM_L: locals.p[i] = x; break;
+          case MEM_A: args.p[-i] = x; break;
+          case MEM_C: closed.p[i] = x; break;
           default: FAIL;
         }
       } break;
@@ -493,24 +513,28 @@ static void interpret (bytefile *bf) {
           case LO_2_CJMP_Z: {
             int    addr = INT;
             size_t x    = s_pop();
-            if (UNBOX(x) == 0) p_instr = bf->code_ptr + addr;
+            if (UNBOX(x) == 0) checked_jmp(addr);
           } break;
 
           case LO_2_CJMP_NZ: {
             int    addr = INT;
             size_t x    = s_pop();
-            if (UNBOX(x) != 0) p_instr = bf->code_ptr + addr;
+            if (UNBOX(x) != 0) checked_jmp(addr);
           } break;
 
           case LO_2_BEGIN:
-            fn_nargs   = INT;
-            fn_nlocals = INT;
+            args.n   = INT;
+            locals.n = INT;
+            ASSERT(args.n >= 0);
+            ASSERT(locals.n >= 0);
             do_begin();
             break;
 
           case LO_2_CBEGIN:
-            fn_nargs   = INT;
-            fn_nlocals = INT;
+            args.n   = INT;
+            locals.n = INT;
+            ASSERT(args.n >= 0);
+            ASSERT(locals.n >= 0);
             /* Т.к. замыкание может быть ссылкой на функцию,
                то его наличие на стеке придётся проверять и
                в обычном BEGIN */
@@ -521,19 +545,16 @@ static void interpret (bytefile *bf) {
             int entry = INT;
             int n     = INT;
             for (int j = 0; j < n; j++) {
-              char pos_type = BYTE;
+              char mem_type = BYTE;
               int  i        = INT;
-
-              size_t n = n_vars(pos_type);
-              if (i < 0 || i >= n)
-                failure("Addressing %dth variable of type %d when only %d exist\n", i, l, n);
+              check_nvars(mem_type, i);
 
               size_t x = 0;
-              switch (pos_type) {
-                case MEM_G: x = p_globals[i]; break;
-                case MEM_L: x = p_locals[i]; break;
-                case MEM_A: x = p_args[-i]; break;
-                case MEM_C: x = p_closed[i]; break;
+              switch (mem_type) {
+                case MEM_G: x = globals.p[i]; break;
+                case MEM_L: x = locals.p[i]; break;
+                case MEM_A: x = args.p[-i]; break;
+                case MEM_C: x = closed.p[i]; break;
                 default: FAIL;
               }
               s_push(x);
@@ -550,17 +571,17 @@ static void interpret (bytefile *bf) {
             data  *obj      = TO_DATA(closure);
             int   *arr      = (int *)obj->contents;
             int    addr     = arr[0];
-            size_t ret_addr = (p_instr - bf->code_ptr) | 0x80000000;
+            size_t ret_addr = (p_instr - code.p) | 0x80000000;
             s_push(ret_addr);
-            p_instr = bf->code_ptr + addr;
+            checked_jmp(addr);
           } break;
 
           case LO_2_CALL: {
             int    addr     = INT;
             int    nargs    = INT;
-            size_t ret_addr = p_instr - bf->code_ptr;
+            size_t ret_addr = p_instr - code.p;
             s_push(ret_addr);
-            p_instr = bf->code_ptr + addr;
+            checked_jmp(addr);
           } break;
 
           case LO_2_TAG: {
@@ -683,7 +704,6 @@ stop:
 int main (int argc, char *argv[]) {
   bytefile *f = read_file(argv[1]);
   interpret(f);
-  free(f->global_ptr);
   free(f);
   return 0;
 }
