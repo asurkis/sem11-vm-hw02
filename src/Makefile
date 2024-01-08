@@ -1,4 +1,4 @@
-CCFLAGS ?= -m32 -g -O2
+CCFLAGS ?= -m32 -g -O2 -DNDEBUG
 
 .PHONY: clean runtime.a
 

@@ -66,24 +66,41 @@ extern size_t __gc_stack_top, __gc_stack_bottom;
 /* Т.к. сборщик мусора рассчитан на один стек,
    сделаем его глобальным */
 #define STACK_SIZE (512 * 1024) /* 2 МБ стека, должно хватить на всё */
-size_t  stack_data[STACK_SIZE];
-size_t *stack_next = stack_data + STACK_SIZE - 1;
+static size_t stack_data[STACK_SIZE];
 
-size_t *s_top () { return stack_next + 1; }
+/* Данные виртуальной машины будем хранить глобально,
+   чтобы можно было легко писать вспомогательные функции,
+   тем более что всё равно нужен глобальный стек */
+static size_t *p_globals = 0;
+static size_t *p_args    = 0;
+static size_t *p_locals  = 0;
+static size_t *p_closed  = 0;
 
-void s_push (size_t x) {
-  *stack_next--  = x;
-  __gc_stack_top = (size_t)stack_next;
+static int stack_nargs   = 0;
+static int stack_nlocals = 0;
+
+static size_t *p_stack_frame = 0;
+
+static char *ip = 0;
+
+static inline size_t *s_top () { return (size_t *)__gc_stack_top + 1; }
+
+static inline void s_push (size_t x) {
+  if (__gc_stack_top < (size_t)stack_data) failure("Stack overflow\n");
+  *(size_t *)__gc_stack_top = x;
+  __gc_stack_top -= sizeof(size_t);
 }
 
-size_t s_pop () {
-  size_t res     = *++stack_next;
-  __gc_stack_top = (size_t)stack_next;
+static inline size_t s_pop () {
+  __gc_stack_top += sizeof(size_t);
+  /* Глобальные переменные никогда не должны быть сняты со стека */
+  if (__gc_stack_top >= (size_t)p_globals) failure("Stack underflow\n");
+  size_t res = *(size_t *)__gc_stack_top;
   return res;
 }
 
 /* Barray, Bsexp и Bclosure не подходят, т.к. в них элементы передаются через varargs */
-size_t Warray (int n) {
+static size_t Warray (int n) {
   data *obj = alloc_array(n);
   int  *arr = (int *)obj->contents;
   for (int i = 0; i < n; ++i) {
@@ -93,7 +110,7 @@ size_t Warray (int n) {
   return (size_t)obj->contents;
 }
 
-size_t Wsexp (char *tag, int n) {
+static size_t Wsexp (char *tag, int n) {
   sexp *s   = alloc_sexp(n);
   data *obj = (data *)s;
   int  *arr = (int *)obj->contents;
@@ -105,7 +122,7 @@ size_t Wsexp (char *tag, int n) {
   return (size_t)obj->contents;
 }
 
-size_t Wclosure (int entry, int n) {
+static size_t Wclosure (int entry, int n) {
   data *obj = alloc_closure(n + 1);
   int  *arr = (int *)obj->contents;
   arr[0]    = entry;
@@ -128,20 +145,27 @@ enum {
   HI_BUILTIN,
 };
 
+#define MACRO_BINOPS(E)                                                                            \
+  E(ADD, +)                                                                                        \
+  E(SUB, -)                                                                                        \
+  E(MUL, *)                                                                                        \
+  E(DIV, /)                                                                                        \
+  E(MOD, %)                                                                                        \
+  E(LT, <)                                                                                         \
+  E(LE, <=)                                                                                        \
+  E(GT, >)                                                                                         \
+  E(GE, >=)                                                                                        \
+  E(EQ, ==)                                                                                        \
+  E(NE, !=)                                                                                        \
+  E(AND, &&)                                                                                       \
+  E(OR, ||)
+
 enum {
-  BINOP_ADD = 1,
-  BINOP_SUB,
-  BINOP_MUL,
-  BINOP_DIV,
-  BINOP_MOD,
-  BINOP_LT,
-  BINOP_LE,
-  BINOP_GT,
-  BINOP_GE,
-  BINOP_EQ,
-  BINOP_NE,
-  BINOP_AND,
-  BINOP_OR,
+  _BINOP_DUMMY = 0,
+
+#define ENTRY(name, op) BINOP_##name,
+  MACRO_BINOPS(ENTRY)
+#undef ENTRY
 };
 
 enum {
@@ -211,24 +235,12 @@ enum {
    Будем добавлять 1 в младший бит указателей не на кучу Ламы,
    чтобы сборщик мусора считал их целыми числами. */
 
-/* Данные виртуальной машины будем хранить глобально,
-   чтобы можно было легко писать вспомогательные функции */
-size_t *p_globals = 0;
-size_t *p_args    = 0;
-size_t *p_locals  = 0;
-size_t *p_closed  = 0;
-
-int stack_nargs   = 0;
-int stack_nlocals = 0;
-
-size_t *p_stack_frame = 0;
-
-void do_begin () {
+static inline void do_begin () {
   /* Адрес возврата, замыкание, аргументы */
   size_t *stack_top = s_top();
   p_args            = stack_top + stack_nargs;
-  int ret_addr      = UNBOX(stack_top[0]);
-  if (ret_addr & 1) {
+  int ret_addr      = stack_top[0];
+  if (ret_addr & 0x80000000) {
     /* Замыкание */
     size_t closure = p_args[1];
     data  *obj     = TO_DATA(closure);
@@ -249,22 +261,21 @@ void do_begin () {
   s_push(BOX(stack_nlocals));
 
   /* Где находится предыдущий стековый фрейм */
-  s_push((size_t)p_stack_frame | 1);
+  s_push((size_t)p_stack_frame);
   p_stack_frame = s_top();
 }
 
-void interpret (bytefile *bf) {
+static void interpret (bytefile *bf) {
   __gc_init();
-  __gc_stack_bottom = (size_t)s_top();
-  __gc_stack_top    = __gc_stack_bottom;
+  __gc_stack_bottom = (size_t)(stack_data + STACK_SIZE);
+  __gc_stack_top    = __gc_stack_bottom - sizeof(size_t);
 
   /* Будем хранить глобальные переменные также на стеке,
      чтобы их тоже видел сборщик мусора */
   for (int i = 0; i < bf->global_area_size; ++i) s_push(BOX(0));
   p_globals = s_top();
 
-  /* Фиктивное замыкание и адрес возврата для главной функции */
-  s_push(BOX(0));
+  /* Фиктивный адрес возврата для главной функции */
   s_push(BOX(0));
 
 #define INT (ip += sizeof(int), *(int *)(ip - sizeof(int)))
@@ -273,10 +284,8 @@ void interpret (bytefile *bf) {
 #define FAIL failure("ERROR: invalid opcode %d-%d\n", h, l)
 #define UNUSED failure("Unused instruction, line %d\n", __LINE__)
 
-  char        *ip     = bf->code_ptr;
-  static char *ops[]  = {"+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=", "&&", "!!"};
-  static char *pats[] = {"=str", "#string", "#array", "#sexp", "#ref", "#val", "#fun"};
-  static char *lds[]  = {"LD", "LDA", "ST"};
+  ip = bf->code_ptr;
+
   for (;;) {
     char opcode = BYTE, h = (opcode & 0xF0) >> 4, l = opcode & 0x0F;
 
@@ -288,19 +297,10 @@ void interpret (bytefile *bf) {
         int x = UNBOX(s_pop());
         int z = 0;
         switch (l) {
-          case BINOP_ADD: z = x + y; break;
-          case BINOP_SUB: z = x - y; break;
-          case BINOP_MUL: z = x * y; break;
-          case BINOP_DIV: z = x / y; break;
-          case BINOP_MOD: z = x % y; break;
-          case BINOP_LT: z = x < y ? 1 : 0; break;
-          case BINOP_LE: z = x <= y ? 1 : 0; break;
-          case BINOP_GT: z = x > y ? 1 : 0; break;
-          case BINOP_GE: z = x >= y ? 1 : 0; break;
-          case BINOP_EQ: z = x == y ? 1 : 0; break;
-          case BINOP_NE: z = x != y ? 1 : 0; break;
-          case BINOP_AND: z = x && y ? 1 : 0; break;
-          case BINOP_OR: z = x || y ? 1 : 0; break;
+#define ENTRY(name, op)                                                                            \
+  case BINOP_##name: z = x op y; break;
+          MACRO_BINOPS(ENTRY)
+#undef ENTRY
         }
         s_push(BOX(z));
       } break;
@@ -352,18 +352,18 @@ void interpret (bytefile *bf) {
 
           case LO_1_END: {
             size_t  retval       = s_pop();
-            size_t *p_prev_frame = (size_t *)((size_t)*p_stack_frame & ~1);
+            size_t *p_prev_frame = (size_t *)*p_stack_frame;
             if (p_prev_frame == 0) {
               /* Выходим из главной функции */
               goto stop;
             }
             int frame_size = stack_nlocals + stack_nargs + 4;
-            int ret_addr   = UNBOX(p_stack_frame[3 + stack_nlocals]);
-            if (ret_addr & 1) {
+            int ret_addr   = p_stack_frame[3 + stack_nlocals];
+            if (ret_addr & 0x80000000) {
               /* Возврат из замыкания */
               ++frame_size;
+              ret_addr &= 0x7FFFFFFF;
             }
-            ret_addr /= 2;
             ip = bf->code_ptr + ret_addr;
 
             /* Убираем текущий фрейм */
@@ -379,8 +379,8 @@ void interpret (bytefile *bf) {
                но проще поменять знак при разыменовании */
             p_args = p_locals + stack_nlocals + stack_nargs;
 
-            ret_addr = UNBOX(p_stack_frame[3 + stack_nlocals]);
-            if (ret_addr & 1) {
+            ret_addr = p_stack_frame[3 + stack_nlocals];
+            if (ret_addr & 0x80000000) {
               /* Вернулись в замыкание */
               size_t closure = p_args[1];
               data  *obj     = TO_DATA(closure);
@@ -507,30 +507,29 @@ void interpret (bytefile *bf) {
             int nargs = INT;
             /* Снять замыкание со стека, если у него нет аргументов, здесь нельзя.
                Придётся обрабатывать наличие замыкания в BEGIN */
-            size_t closure  = ((size_t *)s_top())[nargs];
+            size_t closure  = s_top()[nargs];
             data  *obj      = TO_DATA(closure);
             int   *arr      = (int *)obj->contents;
             int    addr     = arr[0];
-            int    ret_addr = 2 * (ip - bf->code_ptr) + 1;
-            s_push(BOX(ret_addr));
+            size_t ret_addr = (ip - bf->code_ptr) | 0x80000000;
+            s_push(ret_addr);
             ip = bf->code_ptr + addr;
           } break;
 
           case LO_2_CALL: {
-            int addr     = INT;
-            int nargs    = INT;
-            int ret_addr = 2 * (ip - bf->code_ptr);
-            s_push(BOX(ret_addr));
+            int    addr     = INT;
+            int    nargs    = INT;
+            size_t ret_addr = ip - bf->code_ptr;
+            s_push(ret_addr);
             ip = bf->code_ptr + addr;
           } break;
 
           case LO_2_TAG: {
-            char *tag    = STRING;
-            int   nelems = INT;
-
-            size_t x    = s_pop();
-            int    hash = LtagHash(tag);
-            int    y    = Btag((void *)x, hash, BOX(nelems));
+            char  *tag    = STRING;
+            int    nelems = INT;
+            size_t x      = s_pop();
+            int    hash   = LtagHash(tag);
+            int    y      = Btag((void *)x, hash, BOX(nelems));
             s_push(y);
           } break;
 
