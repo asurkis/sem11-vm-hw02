@@ -61,78 +61,6 @@ bytefile *read_file (char *fname) {
   return file;
 }
 
-extern size_t __gc_stack_top, __gc_stack_bottom;
-
-/* Т.к. сборщик мусора рассчитан на один стек,
-   сделаем его глобальным */
-#define STACK_SIZE (512 * 1024) /* 2 МБ стека, должно хватить на всё */
-static size_t stack_data[STACK_SIZE];
-
-/* Данные виртуальной машины будем хранить глобально,
-   чтобы можно было легко писать вспомогательные функции,
-   тем более что всё равно нужен глобальный стек */
-static size_t *p_globals = 0;
-static size_t *p_args    = 0;
-static size_t *p_locals  = 0;
-static size_t *p_closed  = 0;
-
-static int stack_nargs   = 0;
-static int stack_nlocals = 0;
-
-static size_t *p_stack_frame = 0;
-
-static char *ip = 0;
-
-static inline size_t *s_top () { return (size_t *)__gc_stack_top + 1; }
-
-static inline void s_push (size_t x) {
-  if (__gc_stack_top < (size_t)stack_data) failure("Stack overflow\n");
-  *(size_t *)__gc_stack_top = x;
-  __gc_stack_top -= sizeof(size_t);
-}
-
-static inline size_t s_pop () {
-  __gc_stack_top += sizeof(size_t);
-  /* Глобальные переменные никогда не должны быть сняты со стека */
-  if (__gc_stack_top >= (size_t)p_globals) failure("Stack underflow\n");
-  size_t res = *(size_t *)__gc_stack_top;
-  return res;
-}
-
-/* Barray, Bsexp и Bclosure не подходят, т.к. в них элементы передаются через varargs */
-static size_t Warray (int n) {
-  data *obj = alloc_array(n);
-  int  *arr = (int *)obj->contents;
-  for (int i = 0; i < n; ++i) {
-    int x          = s_pop();
-    arr[n - 1 - i] = x;
-  }
-  return (size_t)obj->contents;
-}
-
-static size_t Wsexp (char *tag, int n) {
-  sexp *s   = alloc_sexp(n);
-  data *obj = (data *)s;
-  int  *arr = (int *)obj->contents;
-  s->tag    = UNBOX(LtagHash(tag));
-  for (int i = 0; i < n; ++i) {
-    int x      = s_pop();
-    arr[n - i] = x;
-  }
-  return (size_t)obj->contents;
-}
-
-static size_t Wclosure (int entry, int n) {
-  data *obj = alloc_closure(n + 1);
-  int  *arr = (int *)obj->contents;
-  arr[0]    = entry;
-  for (int i = 0; i < n; ++i) {
-    size_t x   = s_pop();
-    arr[n - i] = x;
-  }
-  return (size_t)obj->contents;
-}
-
 enum {
   HI_STOP  = 15,
   HI_BINOP = 0,
@@ -217,6 +145,90 @@ enum {
   PATT_TAG_FUN,
 };
 
+extern size_t __gc_stack_top, __gc_stack_bottom;
+
+/* Т.к. сборщик мусора рассчитан на один стек,
+   сделаем его глобальным */
+#define STACK_SIZE (512 * 1024) /* 2 МБ стека, должно хватить на всё */
+static size_t stack_data[STACK_SIZE];
+
+/* Данные виртуальной машины будем хранить глобально,
+   чтобы можно было легко писать вспомогательные функции,
+   тем более что всё равно нужен глобальный стек */
+static size_t *p_globals = 0;
+static size_t *p_args    = 0;
+static size_t *p_locals  = 0;
+static size_t *p_closed  = 0;
+
+static int nglobal    = 0;
+static int fn_nlocals = 0;
+static int fn_nargs   = 0;
+static int fn_nclosed = 0;
+
+static size_t *p_stack_frame = 0;
+
+static char *p_instr = 0;
+
+static inline size_t *s_top () { return (size_t *)__gc_stack_top + 1; }
+
+static inline void s_push (size_t x) {
+  if (__gc_stack_top < (size_t)stack_data) failure("Stack overflow\n");
+  *(size_t *)__gc_stack_top = x;
+  __gc_stack_top -= sizeof(size_t);
+}
+
+static inline size_t s_pop () {
+  __gc_stack_top += sizeof(size_t);
+  /* Глобальные переменные никогда не должны быть сняты со стека */
+  if (__gc_stack_top >= (size_t)p_globals) failure("Stack underflow\n");
+  size_t res = *(size_t *)__gc_stack_top;
+  return res;
+}
+
+static inline size_t n_vars (int mem_type) {
+  switch (mem_type) {
+    case MEM_G: return nglobal;
+    case MEM_L: return fn_nlocals;
+    case MEM_A: return fn_nargs;
+    case MEM_C: return fn_nclosed;
+    default: /* Не может быть такого типа */ return 0;
+  }
+}
+
+/* Barray, Bsexp и Bclosure не подходят, т.к. в них элементы передаются через varargs */
+static size_t Warray (int n) {
+  data *obj = alloc_array(n);
+  int  *arr = (int *)obj->contents;
+  for (int i = 0; i < n; ++i) {
+    int x          = s_pop();
+    arr[n - 1 - i] = x;
+  }
+  return (size_t)obj->contents;
+}
+
+static size_t Wsexp (char *tag, int n) {
+  sexp *s   = alloc_sexp(n);
+  data *obj = (data *)s;
+  int  *arr = (int *)obj->contents;
+  s->tag    = UNBOX(LtagHash(tag));
+  for (int i = 0; i < n; ++i) {
+    int x      = s_pop();
+    arr[n - i] = x;
+  }
+  return (size_t)obj->contents;
+}
+
+static size_t Wclosure (int entry, int n) {
+  data *obj = alloc_closure(n + 1);
+  int  *arr = (int *)obj->contents;
+  arr[0]    = entry;
+  for (int i = 0; i < n; ++i) {
+    size_t x   = s_pop();
+    arr[n - i] = x;
+  }
+  return (size_t)obj->contents;
+}
+
 /* Структура стекового фрейма:
    - [Опционально] Объект замыкания
    - Аргументы функции
@@ -238,27 +250,29 @@ enum {
 static inline void do_begin () {
   /* Адрес возврата, замыкание, аргументы */
   size_t *stack_top = s_top();
-  p_args            = stack_top + stack_nargs;
+  p_args            = stack_top + fn_nargs;
   int ret_addr      = stack_top[0];
   if (ret_addr & 0x80000000) {
     /* Замыкание */
     size_t closure = p_args[1];
     data  *obj     = TO_DATA(closure);
+    fn_nclosed     = LEN(obj->data_header) - 1;
     p_closed       = (size_t *)obj->contents + 1;
   } else {
     /* Обычная функция, без замыкания */
-    p_closed = 0;
+    fn_nclosed = 0;
+    p_closed   = 0;
   }
 
   /* Выделим место для локальных переменных.
      Их обязательно нужно занулять,
      чтобы сборщик мусора не принимал
      неинициализированные переменные за указатели. */
-  for (int i = 0; i < stack_nlocals; ++i) s_push(BOX(0));
+  for (int i = 0; i < fn_nlocals; ++i) s_push(BOX(0));
   p_locals = s_top();
 
-  s_push(BOX(stack_nargs));
-  s_push(BOX(stack_nlocals));
+  s_push(BOX(fn_nargs));
+  s_push(BOX(fn_nlocals));
 
   /* Где находится предыдущий стековый фрейм */
   s_push((size_t)p_stack_frame);
@@ -274,17 +288,18 @@ static void interpret (bytefile *bf) {
      чтобы их тоже видел сборщик мусора */
   for (int i = 0; i < bf->global_area_size; ++i) s_push(BOX(0));
   p_globals = s_top();
+  nglobal   = bf->global_area_size;
 
   /* Фиктивный адрес возврата для главной функции */
   s_push(BOX(0));
 
-#define INT (ip += sizeof(int), *(int *)(ip - sizeof(int)))
-#define BYTE *ip++
+#define INT (p_instr += sizeof(int), *(int *)(p_instr - sizeof(int)))
+#define BYTE *p_instr++
 #define STRING get_string(bf, INT)
 #define FAIL failure("ERROR: invalid opcode %d-%d\n", h, l)
 #define UNUSED failure("Unused instruction, line %d\n", __LINE__)
 
-  ip = bf->code_ptr;
+  p_instr = bf->code_ptr;
 
   for (;;) {
     char opcode = BYTE, h = (opcode & 0xF0) >> 4, l = opcode & 0x0F;
@@ -347,7 +362,7 @@ static void interpret (bytefile *bf) {
 
           case LO_1_JMP: {
             int addr = INT;
-            ip       = bf->code_ptr + addr;
+            p_instr  = bf->code_ptr + addr;
           } break;
 
           case LO_1_END: {
@@ -357,37 +372,39 @@ static void interpret (bytefile *bf) {
               /* Выходим из главной функции */
               goto stop;
             }
-            int frame_size = stack_nlocals + stack_nargs + 4;
-            int ret_addr   = p_stack_frame[3 + stack_nlocals];
+            int frame_size = fn_nlocals + fn_nargs + 4;
+            int ret_addr   = p_stack_frame[3 + fn_nlocals];
             if (ret_addr & 0x80000000) {
               /* Возврат из замыкания */
               ++frame_size;
               ret_addr &= 0x7FFFFFFF;
             }
-            ip = bf->code_ptr + ret_addr;
+            p_instr = bf->code_ptr + ret_addr;
 
             /* Убираем текущий фрейм */
             for (int i = 0; i < frame_size; ++i) s_pop();
             p_stack_frame = p_prev_frame;
 
-            stack_nlocals = UNBOX(p_stack_frame[1]);
-            stack_nargs   = UNBOX(p_stack_frame[2]);
+            fn_nlocals = UNBOX(p_stack_frame[1]);
+            fn_nargs   = UNBOX(p_stack_frame[2]);
 
             p_locals = p_stack_frame + 3;
             /* Можно переставлять местами аргументы при вызове,
                т.к. на вершине стека перед вызовом --- последний,
                но проще поменять знак при разыменовании */
-            p_args = p_locals + stack_nlocals + stack_nargs;
+            p_args = p_locals + fn_nlocals + fn_nargs;
 
-            ret_addr = p_stack_frame[3 + stack_nlocals];
+            ret_addr = p_stack_frame[3 + fn_nlocals];
             if (ret_addr & 0x80000000) {
               /* Вернулись в замыкание */
               size_t closure = p_args[1];
               data  *obj     = TO_DATA(closure);
+              fn_nclosed     = LEN(obj->data_header) - 1;
               p_closed       = (size_t *)obj->contents + 1;
             } else {
               /* Вернулись в обычную функцию */
-              p_closed = 0;
+              fn_nclosed = 0;
+              p_closed   = 0;
             }
             s_push(retval);
           } break;
@@ -415,13 +432,18 @@ static void interpret (bytefile *bf) {
         break;
 
       case HI_LD: {
-        int    pos = INT;
-        size_t x   = 0;
+        int i = INT;
+
+        size_t n = n_vars(l);
+        if (i < 0 || i >= n)
+          failure("Addressing %dth variable of type %d when only %d exist\n", i, l, n);
+
+        size_t x = 0;
         switch (l) {
-          case MEM_G: x = p_globals[pos]; break;
-          case MEM_L: x = p_locals[pos]; break;
-          case MEM_A: x = p_args[-pos]; break;
-          case MEM_C: x = p_closed[pos]; break;
+          case MEM_G: x = p_globals[i]; break;
+          case MEM_L: x = p_locals[i]; break;
+          case MEM_A: x = p_args[-i]; break;
+          case MEM_C: x = p_closed[i]; break;
           default: FAIL;
         }
         s_push(x);
@@ -430,6 +452,11 @@ static void interpret (bytefile *bf) {
       case HI_LDA: {
         size_t *addr = 0;
         int     i    = INT;
+
+        size_t n = n_vars(l);
+        if (i < 0 || i >= n)
+          failure("Addressing %dth variable of type %d when only %d exist\n", i, l, n);
+
         switch (l) {
           case MEM_G: addr = p_globals + i; break;
           case MEM_L: addr = p_locals + i; break;
@@ -442,14 +469,18 @@ static void interpret (bytefile *bf) {
       } break;
 
       case HI_ST: {
-        int    pos = INT;
-        size_t x   = *(size_t *)s_top();
+        int i = INT;
 
+        size_t n = n_vars(l);
+        if (i < 0 || i >= n)
+          failure("Addressing %dth variable of type %d when only %d exist\n", i, l, n);
+
+        size_t x = *(size_t *)s_top();
         switch (l) {
-          case MEM_G: p_globals[pos] = x; break;
-          case MEM_L: p_locals[pos] = x; break;
-          case MEM_A: p_args[-pos] = x; break;
-          case MEM_C: p_closed[pos] = x; break;
+          case MEM_G: p_globals[i] = x; break;
+          case MEM_L: p_locals[i] = x; break;
+          case MEM_A: p_args[-i] = x; break;
+          case MEM_C: p_closed[i] = x; break;
           default: FAIL;
         }
       } break;
@@ -459,24 +490,24 @@ static void interpret (bytefile *bf) {
           case LO_2_CJMP_Z: {
             int    addr = INT;
             size_t x    = s_pop();
-            if (UNBOX(x) == 0) ip = bf->code_ptr + addr;
+            if (UNBOX(x) == 0) p_instr = bf->code_ptr + addr;
           } break;
 
           case LO_2_CJMP_NZ: {
             int    addr = INT;
             size_t x    = s_pop();
-            if (UNBOX(x) != 0) ip = bf->code_ptr + addr;
+            if (UNBOX(x) != 0) p_instr = bf->code_ptr + addr;
           } break;
 
           case LO_2_BEGIN:
-            stack_nargs   = INT;
-            stack_nlocals = INT;
+            fn_nargs   = INT;
+            fn_nlocals = INT;
             do_begin();
             break;
 
           case LO_2_CBEGIN:
-            stack_nargs   = INT;
-            stack_nlocals = INT;
+            fn_nargs   = INT;
+            fn_nlocals = INT;
             /* Т.к. замыкание может быть ссылкой на функцию,
                то его наличие на стеке придётся проверять и
                в обычном BEGIN */
@@ -486,15 +517,20 @@ static void interpret (bytefile *bf) {
           case LO_2_CLOSURE: {
             int entry = INT;
             int n     = INT;
-            for (int i = 0; i < n; i++) {
-              char   pos_type = BYTE;
-              int    pos      = INT;
-              size_t x        = 0;
+            for (int j = 0; j < n; j++) {
+              char pos_type = BYTE;
+              int  i        = INT;
+
+              size_t n = n_vars(pos_type);
+              if (i < 0 || i >= n)
+                failure("Addressing %dth variable of type %d when only %d exist\n", i, l, n);
+
+              size_t x = 0;
               switch (pos_type) {
-                case MEM_G: x = p_globals[pos]; break;
-                case MEM_L: x = p_locals[pos]; break;
-                case MEM_A: x = p_args[-pos]; break;
-                case MEM_C: x = p_closed[pos]; break;
+                case MEM_G: x = p_globals[i]; break;
+                case MEM_L: x = p_locals[i]; break;
+                case MEM_A: x = p_args[-i]; break;
+                case MEM_C: x = p_closed[i]; break;
                 default: FAIL;
               }
               s_push(x);
@@ -511,17 +547,17 @@ static void interpret (bytefile *bf) {
             data  *obj      = TO_DATA(closure);
             int   *arr      = (int *)obj->contents;
             int    addr     = arr[0];
-            size_t ret_addr = (ip - bf->code_ptr) | 0x80000000;
+            size_t ret_addr = (p_instr - bf->code_ptr) | 0x80000000;
             s_push(ret_addr);
-            ip = bf->code_ptr + addr;
+            p_instr = bf->code_ptr + addr;
           } break;
 
           case LO_2_CALL: {
             int    addr     = INT;
             int    nargs    = INT;
-            size_t ret_addr = ip - bf->code_ptr;
+            size_t ret_addr = p_instr - bf->code_ptr;
             s_push(ret_addr);
-            ip = bf->code_ptr + addr;
+            p_instr = bf->code_ptr + addr;
           } break;
 
           case LO_2_TAG: {
