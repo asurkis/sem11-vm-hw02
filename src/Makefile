@@ -9,10 +9,10 @@ clean:
 	rm -rf *.o lama-impl
 
 lama-impl: byterun.o runtime
-	$(CC) $(CCFLAGS) byterun.o ../runtime/runtime.a ../runtime/virt_stack.o -o lama-impl
+	$(CC) $(CCFLAGS) byterun.o ../runtime/runtime.a -o lama-impl
 
 runtime:
-	$(MAKE) -C ../runtime all virt_stack.o
+	$(MAKE) -C ../runtime
 
 %.o: %.c
 	$(CC) $(CCFLAGS) -c $*.c
