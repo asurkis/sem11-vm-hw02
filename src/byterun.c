@@ -33,7 +33,10 @@ typedef struct {
 
 /* Gets a string from a string table by an index */
 char *get_string (bytefile *f, int pos) {
-  ASSERT((size_t)pos < f->stringtab_size);
+  ASSERT_MSG((size_t)pos < f->stringtab_size,
+             "Incorrect shift %d for string, string table size is %d\n",
+             pos,
+             f->stringtab_size);
   return &f->string_ptr[pos];
 }
 
@@ -202,7 +205,7 @@ static inline size_t s_pop () {
 }
 
 static inline void checked_jmp (size_t addr) {
-  ASSERT(addr < code.n);
+  ASSERT_MSG(addr < code.n, "Jump to address %p with file size %p\n", (void *)addr, (void *)code.n);
   p_instr = code.p + addr;
 }
 
@@ -308,6 +311,18 @@ static inline void do_begin () {
   p_stack_frame = s_top();
 }
 
+static int instr_int () {
+  ASSERT_MSG(p_instr + sizeof(int) <= code.p + code.n, "Unexpected end of bytecode");
+  int res = *(int *)p_instr;
+  p_instr += sizeof(int);
+  return res;
+}
+
+static unsigned char instr_byte () {
+  ASSERT_MSG(p_instr < code.p + code.n, "Unexpected end of bytecode");
+  return *p_instr++;
+}
+
 static void interpret (bytefile *bf) {
   __gc_init();
   __gc_stack_bottom = (size_t)(stack_data + STACK_SIZE);
@@ -322,8 +337,8 @@ static void interpret (bytefile *bf) {
   /* Фиктивный адрес возврата для главной функции */
   s_push(0);
 
-#define INT (p_instr += sizeof(int), *(int *)(p_instr - sizeof(int)))
-#define BYTE *p_instr++
+#define INT instr_int()
+#define BYTE instr_byte()
 #define STRING get_string(bf, INT)
 #define FAIL failure("ERROR: invalid opcode %d-%d\n", h, l)
 #define UNUSED failure("Unused instruction, line %d\n", __LINE__)
@@ -446,7 +461,9 @@ static void interpret (bytefile *bf) {
           case LO_1_DROP: s_pop(); break;
 
           case LO_1_DUP: {
-            size_t x = *(size_t *)s_top();
+            /* pop покажет stack underflow */
+            size_t x = s_pop();
+            s_push(x);
             s_push(x);
           } break;
 
@@ -525,16 +542,16 @@ static void interpret (bytefile *bf) {
           case LO_2_BEGIN:
             args.n   = INT;
             locals.n = INT;
-            ASSERT(args.n >= 0);
-            ASSERT(locals.n >= 0);
+            ASSERT_MSG(args.n >= 0, "Negative function argument count");
+            ASSERT_MSG(locals.n >= 0, "Negative function local variable count");
             do_begin();
             break;
 
           case LO_2_CBEGIN:
             args.n   = INT;
             locals.n = INT;
-            ASSERT(args.n >= 0);
-            ASSERT(locals.n >= 0);
+            ASSERT_MSG(args.n >= 0, "Negative function argument count");
+            ASSERT_MSG(locals.n >= 0, "Negative function local variable count");
             /* Т.к. замыкание может быть ссылкой на функцию,
                то его наличие на стеке придётся проверять и
                в обычном BEGIN */
