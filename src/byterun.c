@@ -268,7 +268,7 @@ static inline void do_begin () {
      Их обязательно нужно занулять,
      чтобы сборщик мусора не принимал
      неинициализированные переменные за указатели. */
-  for (int i = 0; i < fn_nlocals; ++i) s_push(BOX(0));
+  for (int i = 0; i < fn_nlocals; ++i) s_push(0);
   p_locals = s_top();
 
   s_push(BOX(fn_nargs));
@@ -286,12 +286,12 @@ static void interpret (bytefile *bf) {
 
   /* Будем хранить глобальные переменные также на стеке,
      чтобы их тоже видел сборщик мусора */
-  for (int i = 0; i < bf->global_area_size; ++i) s_push(BOX(0));
+  for (int i = 0; i < bf->global_area_size; ++i) s_push(0);
   p_globals = s_top();
   nglobal   = bf->global_area_size;
 
   /* Фиктивный адрес возврата для главной функции */
-  s_push(BOX(0));
+  s_push(0);
 
 #define INT (p_instr += sizeof(int), *(int *)(p_instr - sizeof(int)))
 #define BYTE *p_instr++
@@ -316,6 +316,7 @@ static void interpret (bytefile *bf) {
   case BINOP_##name: z = x op y; break;
           MACRO_BINOPS(ENTRY)
 #undef ENTRY
+          default: FAIL;
         }
         s_push(BOX(z));
       } break;
