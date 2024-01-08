@@ -14,8 +14,6 @@
     if (!(cond)) failure(__VA_ARGS__);                                                             \
   } while (0)
 
-#define ASSERT(cond) ASSERT_MSG(cond, "Assertion failed at line %d: %s\n", __LINE__, #cond)
-
 void *__stop_custom_data  = 0;
 void *__start_custom_data = 0;
 
@@ -32,13 +30,7 @@ typedef struct {
 } bytefile;
 
 /* Gets a string from a string table by an index */
-char *get_string (bytefile *f, int pos) {
-  ASSERT_MSG((size_t)pos < f->stringtab_size,
-             "Incorrect shift %d for string, string table size is %d\n",
-             pos,
-             f->stringtab_size);
-  return &f->string_ptr[pos];
-}
+char *get_string (bytefile *f, int pos) { return &f->string_ptr[pos]; }
 
 /* Gets a name for a public symbol */
 char *get_public_name (bytefile *f, int i) { return get_string(f, f->public_ptr[i * 2]); }
@@ -185,13 +177,14 @@ static slice_size_t closed  = {};
 
 static size_t *p_stack_frame = 0;
 
-slice_uchar           code    = {};
-static unsigned char *p_instr = 0;
+slice_uchar           code       = {};
+static unsigned char *p_instr    = 0;
+void                 *instr_desc = 0;
 
 static inline size_t *s_top () { return (size_t *)__gc_stack_top + 1; }
 
 static inline void s_push (size_t x) {
-  ASSERT_MSG(__gc_stack_top >= (size_t)stack_data, "Stack overflow\n");
+  ASSERT_MSG(__gc_stack_top >= (size_t)stack_data, "Stack overflow at %p\n", instr_desc);
   *(size_t *)__gc_stack_top = x;
   __gc_stack_top -= sizeof(size_t);
 }
@@ -199,13 +192,17 @@ static inline void s_push (size_t x) {
 static inline size_t s_pop () {
   __gc_stack_top += sizeof(size_t);
   /* Глобальные переменные никогда не должны быть сняты со стека */
-  ASSERT_MSG(__gc_stack_top < (size_t)globals.p, "Stack underflow\n");
+  ASSERT_MSG(__gc_stack_top < (size_t)globals.p, "Stack underflow at %p\n", instr_desc);
   size_t res = *(size_t *)__gc_stack_top;
   return res;
 }
 
 static inline void checked_jmp (size_t addr) {
-  ASSERT_MSG(addr < code.n, "Jump to address %p with file size %p\n", (void *)addr, (void *)code.n);
+  ASSERT_MSG(addr < code.n,
+             "Jump to address %p with file size %p at %p\n",
+             (void *)addr,
+             (void *)code.n,
+             instr_desc);
   p_instr = code.p + addr;
 }
 
@@ -223,8 +220,12 @@ static inline size_t n_vars (int mem_type) {
 
 static inline void check_nvars (int mem_type, int i) {
   size_t n = n_vars(mem_type);
-  ASSERT_MSG(
-      (size_t)i < n, "Addressing %dth variable of type %d when only %d exist\n", i, mem_type, n);
+  ASSERT_MSG((size_t)i < n,
+             "Addressing %dth variable of type %d when only %d exist at %p\n",
+             i,
+             mem_type,
+             n,
+             instr_desc);
 }
 
 /* Barray, Bsexp и Bclosure не подходят, т.к. в них элементы передаются через varargs */
@@ -312,15 +313,30 @@ static inline void do_begin () {
 }
 
 static int instr_int () {
-  ASSERT_MSG(p_instr + sizeof(int) <= code.p + code.n, "Unexpected end of bytecode");
+  ASSERT_MSG(p_instr + sizeof(int) <= code.p + code.n,
+             "Unexpected end of bytecode when reading integer argument at %p\n",
+             (void *)(p_instr - code.p));
   int res = *(int *)p_instr;
   p_instr += sizeof(int);
   return res;
 }
 
 static unsigned char instr_byte () {
-  ASSERT_MSG(p_instr < code.p + code.n, "Unexpected end of bytecode");
+  ASSERT_MSG(p_instr < code.p + code.n,
+             "Unexpected end of bytecode when reading byte at %p\n",
+             (void *)(p_instr - code.p));
   return *p_instr++;
+}
+
+static inline char *instr_string (bytefile *bf) {
+  int pos = instr_int();
+  ASSERT_MSG(
+      (size_t)pos < bf->stringtab_size,
+      "Incorrect shift %d for string, string table size is %d when reading string argument at %p\n",
+      pos,
+      bf->stringtab_size,
+      (void *)(p_instr - sizeof(int) - code.p));
+  return get_string(bf, pos);
 }
 
 static void interpret (bytefile *bf) {
@@ -339,7 +355,7 @@ static void interpret (bytefile *bf) {
 
 #define INT instr_int()
 #define BYTE instr_byte()
-#define STRING get_string(bf, INT)
+#define STRING instr_string(bf)
 #define FAIL failure("ERROR: invalid opcode %d-%d\n", h, l)
 #define UNUSED failure("Unused instruction, line %d\n", __LINE__)
 
@@ -348,6 +364,7 @@ static void interpret (bytefile *bf) {
   p_instr = code.p;
 
   for (;;) {
+    instr_desc           = (void *)(p_instr - code.p);
     unsigned char opcode = BYTE, h = (opcode & 0xF0) >> 4, l = opcode & 0x0F;
 
     switch (h) {
@@ -542,16 +559,16 @@ static void interpret (bytefile *bf) {
           case LO_2_BEGIN:
             args.n   = INT;
             locals.n = INT;
-            ASSERT_MSG(args.n >= 0, "Negative function argument count");
-            ASSERT_MSG(locals.n >= 0, "Negative function local variable count");
+            ASSERT_MSG(args.n >= 0, "Negative function argument count at %p\n", instr_desc);
+            ASSERT_MSG(locals.n >= 0, "Negative function local variable count at %p\n", instr_desc);
             do_begin();
             break;
 
           case LO_2_CBEGIN:
             args.n   = INT;
             locals.n = INT;
-            ASSERT_MSG(args.n >= 0, "Negative function argument count");
-            ASSERT_MSG(locals.n >= 0, "Negative function local variable count");
+            ASSERT_MSG(args.n >= 0, "Negative function argument count at %p\n", instr_desc);
+            ASSERT_MSG(locals.n >= 0, "Negative function local variable count at %p\n", instr_desc);
             /* Т.к. замыкание может быть ссылкой на функцию,
                то его наличие на стеке придётся проверять и
                в обычном BEGIN */
