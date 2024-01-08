@@ -8,4 +8,4 @@ Sort    1.75
 
 Sort
 `which time` -f "Sort\t%U" ../src/lama-impl Sort.bc
-Sort    4.76
+Sort    3.33

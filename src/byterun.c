@@ -9,8 +9,8 @@
 #include <stdio.h>
 #include <string.h>
 
-void *__start_custom_data;
-void *__stop_custom_data;
+void *__stop_custom_data  = 0;
+void *__start_custom_data = 0;
 
 /* The unpacked representation of bytecode file */
 typedef struct {
@@ -227,8 +227,8 @@ void do_begin () {
   /* Адрес возврата, замыкание, аргументы */
   size_t *stack_top = s_top();
   p_args            = stack_top + stack_nargs;
-  size_t is_closure = stack_top[1];
-  if (UNBOX(is_closure)) {
+  int ret_addr      = UNBOX(stack_top[0]);
+  if (ret_addr & 1) {
     /* Замыкание */
     size_t closure = p_args[1];
     data  *obj     = TO_DATA(closure);
@@ -379,8 +379,8 @@ void interpret (bytefile *bf) {
                но проще поменять знак при разыменовании */
             p_args = p_locals + stack_nlocals + stack_nargs;
 
-            size_t is_closure = p_stack_frame[3 + stack_nlocals];
-            if (UNBOX(is_closure)) {
+            ret_addr = UNBOX(p_stack_frame[3 + stack_nlocals]);
+            if (ret_addr & 1) {
               /* Вернулись в замыкание */
               size_t closure = p_args[1];
               data  *obj     = TO_DATA(closure);

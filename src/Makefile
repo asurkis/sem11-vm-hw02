@@ -1,4 +1,4 @@
-CCFLAGS ?= -m32 -g -fsanitize=address
+CCFLAGS ?= -m32 -g -O2
 
 .PHONY: clean runtime.a
 
