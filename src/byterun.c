@@ -191,7 +191,9 @@ static inline size_t n_vars (int mem_type) {
     case MEM_L: return fn_nlocals;
     case MEM_A: return fn_nargs;
     case MEM_C: return fn_nclosed;
-    default: /* Не может быть такого типа */ return 0;
+    default:
+      failure("Incorrect memory type: %d\n", mem_type);
+      return 0; /* Подавляем предупреждение компилятора */
   }
 }
 
